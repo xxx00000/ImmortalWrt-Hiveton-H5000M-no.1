@@ -13,7 +13,7 @@ permissions:
 env:
   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
   WRT_CONFIG: 'MEDIATEK-WIFI-YES'
-  WRT_THEME: 'aurora'
+  WRT_THEME: 'bootstrap'
   WRT_NAME: 'H5000M'
   WRT_SSID: 'H5000M'
   WRT_WORD: '12345678'
@@ -122,8 +122,8 @@ jobs:
         if: env.WRT_TEST != 'true'
         uses: actions/cache@v4
         with:
-          key: ${{env.WRT_CONFIG}}-${{env.WRT_INFO}}-${{env.WRT_HASH}}
-          restore-keys: ${{env.WRT_CONFIG}}-${{env.WRT_INFO}}
+          key: multi-modem-v2-${{env.WRT_CONFIG}}-${{env.WRT_INFO}}-${{env.WRT_HASH}}
+          restore-keys: multi-modem-v2-${{env.WRT_CONFIG}}-${{env.WRT_INFO}}
           path: |
             ./wrt/.ccache
             ./wrt/staging_dir/host*
@@ -157,15 +157,23 @@ jobs:
         run: |
           cd ./wrt/
 
+          sed -i '/^src-.*[[:space:]]video[[:space:]]/d' feeds.conf.default
+          printf '\nsrc-git qmodem https://github.com/FUjr/QModem.git;main\n' >> feeds.conf.default
           ./scripts/feeds update -a
+          # Unused audio package has a confirmed recursive Kconfig dependency.
+          rm -rf feeds/packages/sound/squeezelite
           ./scripts/feeds install -a
 
       - name: Custom Packages
         run: |
           cd ./wrt/package/
 
-          $GITHUB_WORKSPACE/Scripts/Packages.sh
-          $GITHUB_WORKSPACE/Scripts/Handles.sh
+          git clone --depth=1 https://github.com/FAN789/luci-app-h5000m-fancontrol.git
+          git clone --depth=1 https://github.com/FAN789/luci-app-mt5700m.git
+          git clone --depth=1 https://github.com/FAN789/luci-app-h5000m-netmode.git
+          # QModem is installed through its documented feed, not nested in package/.
+          test -f ../feeds/qmodem/luci/luci-app-qmodem-next/Makefile
+          test -f luci-app-mt5700m/mt5700m-transport/Makefile
 
       - name: Custom Settings
         run: |
@@ -174,7 +182,33 @@ jobs:
           if [[ "${WRT_CONFIG,,}" == *"test"* ]]; then
             cat $GITHUB_WORKSPACE/Config/$WRT_CONFIG.txt >> .config
           else
-            cat $GITHUB_WORKSPACE/Config/$WRT_CONFIG.txt $GITHUB_WORKSPACE/Config/GENERAL.txt >> .config
+            cat $GITHUB_WORKSPACE/Config/$WRT_CONFIG.txt >> .config
+            cat >> .config <<'EOF'
+          CONFIG_PACKAGE_luci=y
+          CONFIG_LUCI_LANG_zh_Hans=y
+          CONFIG_PACKAGE_luci-app-mt5700m=y
+          CONFIG_PACKAGE_mt5700m-transport=y
+          CONFIG_PACKAGE_luci-app-h5000m-fancontrol=y
+          CONFIG_PACKAGE_luci-app-h5000m-netmode=y
+          CONFIG_PACKAGE_kmod-usb3=y
+          CONFIG_PACKAGE_kmod-usb-serial=y
+          CONFIG_PACKAGE_kmod-usb-serial-option=y
+          CONFIG_PACKAGE_kmod-usb-net=y
+          CONFIG_PACKAGE_kmod-usb-net-cdc-ether=y
+          CONFIG_PACKAGE_kmod-usb-net-cdc-ncm=y
+          CONFIG_PACKAGE_kmod-usb-net-cdc-mbim=y
+          CONFIG_PACKAGE_kmod-usb-net-rndis=y
+          CONFIG_PACKAGE_kmod-usb-net-qmi-wwan=y
+          CONFIG_PACKAGE_luci-proto-qmi=y
+          CONFIG_PACKAGE_luci-proto-mbim=y
+          CONFIG_PACKAGE_luci-app-ttyd=y
+          CONFIG_PACKAGE_luci-i18n-ttyd-zh-cn=y
+          CONFIG_PACKAGE_usbutils=y
+          CONFIG_PACKAGE_pciutils=y
+          CONFIG_PACKAGE_ip-full=y
+          CONFIG_PACKAGE_htop=y
+          CONFIG_PACKAGE_curl=y
+          EOF
           fi
 
           $GITHUB_WORKSPACE/Scripts/Settings.sh
@@ -255,6 +289,19 @@ jobs:
 
             make clean -j$(nproc)
           fi
+
+      - name: Upload Failure Diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: H5000M-diagnostics-${{ github.run_id }}
+          include-hidden-files: true
+          path: |
+            wrt/.config
+            wrt/tmp/.packageinfo
+            wrt/tmp/.config-package.in
+            wrt/feeds.conf.default
+          retention-days: 7
 
       - name: Checksum Artifacts
         run: |
