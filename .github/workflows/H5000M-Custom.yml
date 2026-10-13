@@ -24,6 +24,10 @@ env:
   WRT_SOURCE: 'immortalwrt/immortalwrt'
   WRT_TEST: ${{ inputs.config_only && 'true' || 'false' }}
   WRT_PACKAGE: |
+    CONFIG_TARGET_MULTI_PROFILE=y
+    CONFIG_TARGET_ALL_PROFILES=n
+    CONFIG_TARGET_PER_DEVICE_ROOTFS=y
+    CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_hiveton_h5000m=y
     CONFIG_PACKAGE_qmodem=y
     CONFIG_PACKAGE_luci-app-qmodem-next=y
     # CONFIG_PACKAGE_luci-app-qmodem is not set
