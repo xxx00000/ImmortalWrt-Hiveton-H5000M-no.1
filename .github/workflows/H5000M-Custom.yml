@@ -166,6 +166,11 @@ jobs:
           ./scripts/feeds update -a
           # Unused audio package has a confirmed recursive Kconfig dependency.
           rm -rf feeds/packages/sound/squeezelite
+          # Current ImmortalWrt exposes MHI WWAN control/MBIM leaf modules,
+          # not the obsolete aggregate kmod-mhi-wwan requested by QModem.
+          grep -q '+PACKAGE_qmodem_GENERIC_MHI_PCIe_DRIVER:kmod-mhi-wwan ' feeds/qmodem/application/qmodem/Makefile
+          sed -i '/+PACKAGE_qmodem_GENERIC_MHI_PCIe_DRIVER:kmod-mhi-wwan /d' feeds/qmodem/application/qmodem/Makefile
+          ./scripts/feeds update -i qmodem
           ./scripts/feeds install -a
 
       - name: Custom Packages
@@ -232,6 +237,7 @@ jobs:
           EOF
           chmod 755 files/etc/uci-defaults/99-h5000m-modem-owner
           make defconfig -j$(nproc)
+          grep -E '^CONFIG_PACKAGE_(qmodem|luci-app-qmodem|kmod-mhi|kmod-mtk-t7xx)|^# CONFIG_PACKAGE_(qmodem|luci-app-qmodem)' .config || true
           for symbol in TARGET_DEVICE_mediatek_filogic_DEVICE_hiveton_h5000m PACKAGE_luci-app-mt5700m PACKAGE_mt5700m-transport PACKAGE_luci-app-h5000m-fancontrol PACKAGE_luci-app-qmodem-next PACKAGE_qmodem PACKAGE_kmod-usb-net-rndis PACKAGE_kmod-usb-net-cdc-mbim PACKAGE_kmod-usb-net-qmi-wwan PACKAGE_kmod-mtk-t7xx; do
             grep -qx "CONFIG_${symbol}=y" .config || { echo "Required config missing: $symbol" >&2; exit 1; }
           done
