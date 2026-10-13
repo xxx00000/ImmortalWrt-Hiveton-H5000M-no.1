@@ -1,5 +1,5 @@
 # Based on the MIT-licensed WRT-CORE.yml from LianXia233/OpenWRT-CI-H5000M.
-name: H5000M Custom
+name: H5000M Stable 25.12.2
 on:
   workflow_dispatch:
     inputs:
@@ -20,8 +20,13 @@ env:
   WRT_IP: '192.168.10.1'
   WRT_PW: 'No initial root password; set one before use'
   WRT_REPO: 'https://github.com/immortalwrt/immortalwrt.git'
-  WRT_BRANCH: 'master'
+  WRT_BRANCH: 'v25.12.2'
   WRT_SOURCE: 'immortalwrt/immortalwrt'
+  WRT_COMMIT: '4fc16f2985a358bd43bb522e43f05395fcbd6ed5'
+  QMODEM_COMMIT: '5cc80e5f9fc218cd50bef9749dc7d0027e8b3072'
+  FANCONTROL_COMMIT: '9bab7f720627b7e00a04d448a37542691b6c65c7'
+  MT5700M_COMMIT: '93f6a65e33bab1dde645d7abe0e85e8215ae140d'
+  NETMODE_COMMIT: 'c6710f8fb536c84a6e8506d4acdaae4e8c763568'
   WRT_TEST: ${{ inputs.config_only && 'true' || 'false' }}
   WRT_PACKAGE: |
     CONFIG_TARGET_MULTI_PROFILE=y
@@ -31,12 +36,12 @@ env:
     CONFIG_PACKAGE_qmodem=y
     CONFIG_PACKAGE_luci-app-qmodem-next=y
     # CONFIG_PACKAGE_luci-app-qmodem is not set
-    CONFIG_PACKAGE_qmodem_INCLUDE_generic-qmi-wwan=y
-    # CONFIG_PACKAGE_qmodem_INCLUDE_vendor-qmi-wwan is not set
-    CONFIG_PACKAGE_qmodem_INCLUDE_ADD_PCI_SUPPORT=y
-    CONFIG_PACKAGE_qmodem_GENERIC_MHI_PCIe_DRIVER=y
-    # CONFIG_PACKAGE_qmodem_VENDOR_MHI_PCIe_DRIVER is not set
-    CONFIG_PACKAGE_qmodem_INCLUDE_ADD_MTK_T7XX_SUPPORT=y
+    CONFIG_PACKAGE_ndisc6=y
+    CONFIG_PACKAGE_quectel-CM-5G-M=y
+    CONFIG_PACKAGE_kmod-mhi-bus=y
+    CONFIG_PACKAGE_kmod-mhi-pci-generic=y
+    CONFIG_PACKAGE_kmod-mhi-wwan-ctrl=y
+    CONFIG_PACKAGE_kmod-mhi-wwan-mbim=y
     CONFIG_PACKAGE_kmod-mtk-t7xx=y
     CONFIG_PACKAGE_umbim=y
     CONFIG_PACKAGE_uqmi=y
@@ -109,6 +114,8 @@ jobs:
         run: |
           git clone --depth=1 --single-branch --branch $WRT_BRANCH $WRT_REPO ./wrt/
 
+          test "$(git -C ./wrt rev-parse HEAD)" = "$WRT_COMMIT"
+
           cd ./wrt/ && echo "WRT_HASH=$(git log -1 --pretty=format:'%h')" >> $GITHUB_ENV
 
           # GitHub Action 移除国内下载源
@@ -161,25 +168,31 @@ jobs:
         run: |
           cd ./wrt/
 
+          # video/Qt and squeezelite are not used by this firmware and contain
+          # confirmed recursive Kconfig definitions in the pinned release feeds.
           sed -i '/^src-.*[[:space:]]video[[:space:]]/d' feeds.conf.default
-          printf '\nsrc-git qmodem https://github.com/FUjr/QModem.git;main\n' >> feeds.conf.default
+          printf '\nsrc-git qmodem https://github.com/FUjr/QModem.git^%s\n' "$QMODEM_COMMIT" >> feeds.conf.default
           ./scripts/feeds update -a
-          # Unused audio package has a confirmed recursive Kconfig dependency.
           rm -rf feeds/packages/sound/squeezelite
-          # Current ImmortalWrt exposes MHI WWAN control/MBIM leaf modules,
-          # not the obsolete aggregate kmod-mhi-wwan requested by QModem.
-          grep -q '+PACKAGE_qmodem_GENERIC_MHI_PCIe_DRIVER:kmod-mhi-wwan ' feeds/qmodem/application/qmodem/Makefile
-          sed -i '/+PACKAGE_qmodem_GENERIC_MHI_PCIe_DRIVER:kmod-mhi-wwan /d' feeds/qmodem/application/qmodem/Makefile
-          ./scripts/feeds update -i qmodem
+          test "$(git -C feeds/qmodem rev-parse HEAD)" = "$QMODEM_COMMIT"
+          grep -qx 'QMODEM_VERSION:=3.3.0' feeds/qmodem/version.mk
           ./scripts/feeds install -a
 
       - name: Custom Packages
         run: |
           cd ./wrt/package/
 
-          git clone --depth=1 https://github.com/FAN789/luci-app-h5000m-fancontrol.git
-          git clone --depth=1 https://github.com/FAN789/luci-app-mt5700m.git
-          git clone --depth=1 https://github.com/FAN789/luci-app-h5000m-netmode.git
+          clone_commit() {
+            local url="$1" dir="$2" commit="$3"
+            git init "$dir"
+            git -C "$dir" remote add origin "$url"
+            git -C "$dir" fetch --depth=1 origin "$commit"
+            git -C "$dir" checkout --detach FETCH_HEAD
+            test "$(git -C "$dir" rev-parse HEAD)" = "$commit"
+          }
+          clone_commit https://github.com/FAN789/luci-app-h5000m-fancontrol.git luci-app-h5000m-fancontrol "$FANCONTROL_COMMIT"
+          clone_commit https://github.com/FAN789/luci-app-mt5700m.git luci-app-mt5700m "$MT5700M_COMMIT"
+          clone_commit https://github.com/FAN789/luci-app-h5000m-netmode.git luci-app-h5000m-netmode "$NETMODE_COMMIT"
           # QModem is installed through its documented feed, not nested in package/.
           test -f ../feeds/qmodem/luci/luci-app-qmodem-next/Makefile
           test -f luci-app-mt5700m/mt5700m-transport/Makefile
@@ -208,6 +221,15 @@ jobs:
           CONFIG_PACKAGE_kmod-usb-net-cdc-mbim=y
           CONFIG_PACKAGE_kmod-usb-net-rndis=y
           CONFIG_PACKAGE_kmod-usb-net-qmi-wwan=y
+          CONFIG_PACKAGE_ndisc6=y
+          CONFIG_PACKAGE_quectel-CM-5G-M=y
+          CONFIG_PACKAGE_kmod-mhi-bus=y
+          CONFIG_PACKAGE_kmod-mhi-pci-generic=y
+          CONFIG_PACKAGE_kmod-mhi-wwan-ctrl=y
+          CONFIG_PACKAGE_kmod-mhi-wwan-mbim=y
+          CONFIG_PACKAGE_kmod-mtk-t7xx=y
+          CONFIG_PACKAGE_umbim=y
+          CONFIG_PACKAGE_uqmi=y
           CONFIG_PACKAGE_luci-proto-qmi=y
           CONFIG_PACKAGE_luci-proto-mbim=y
           CONFIG_PACKAGE_luci-app-ttyd=y
@@ -237,8 +259,8 @@ jobs:
           EOF
           chmod 755 files/etc/uci-defaults/99-h5000m-modem-owner
           make defconfig -j$(nproc)
-          grep -E '^CONFIG_PACKAGE_(qmodem|luci-app-qmodem|kmod-mhi|kmod-mtk-t7xx)|^# CONFIG_PACKAGE_(qmodem|luci-app-qmodem)' .config || true
-          for symbol in TARGET_DEVICE_mediatek_filogic_DEVICE_hiveton_h5000m PACKAGE_luci-app-mt5700m PACKAGE_mt5700m-transport PACKAGE_luci-app-h5000m-fancontrol PACKAGE_luci-app-qmodem-next PACKAGE_qmodem PACKAGE_kmod-usb-net-rndis PACKAGE_kmod-usb-net-cdc-mbim PACKAGE_kmod-usb-net-qmi-wwan PACKAGE_kmod-mtk-t7xx; do
+          grep -E '^CONFIG_PACKAGE_(qmodem|luci-app-qmodem|quectel-CM|kmod-mhi|kmod-mtk-t7xx)|^# CONFIG_PACKAGE_(qmodem|luci-app-qmodem)' .config || true
+          for symbol in TARGET_DEVICE_mediatek_filogic_DEVICE_hiveton_h5000m PACKAGE_luci-app-mt5700m PACKAGE_mt5700m-transport PACKAGE_luci-app-h5000m-fancontrol PACKAGE_luci-app-qmodem-next PACKAGE_qmodem PACKAGE_quectel-CM-5G-M PACKAGE_kmod-usb-net-rndis PACKAGE_kmod-usb-net-cdc-ncm PACKAGE_kmod-usb-net-cdc-mbim PACKAGE_kmod-usb-net-qmi-wwan PACKAGE_kmod-mhi-pci-generic PACKAGE_kmod-mhi-wwan-ctrl PACKAGE_kmod-mhi-wwan-mbim PACKAGE_kmod-mtk-t7xx; do
             grep -qx "CONFIG_${symbol}=y" .config || { echo "Required config missing: $symbol" >&2; exit 1; }
           done
           ! grep -qx 'CONFIG_PACKAGE_luci-app-qmodem=y' .config
