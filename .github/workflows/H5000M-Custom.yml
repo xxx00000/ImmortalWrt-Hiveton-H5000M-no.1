@@ -15,10 +15,11 @@ env:
   WRT_CONFIG: 'MEDIATEK-WIFI-YES'
   WRT_THEME: 'bootstrap'
   WRT_NAME: 'H5000M'
-  WRT_SSID: 'H5000M'
-  WRT_WORD: '12345678'
-  WRT_IP: '192.168.10.1'
-  WRT_PW: 'No initial root password; set one before use'
+  WRT_SSID_2G: 'H5KM'
+  WRT_SSID_5G: 'H5KM+'
+  WRT_WORD: 'password'
+  WRT_IP: '10.0.0.1'
+  WRT_PW: 'password'
   WRT_REPO: 'https://github.com/immortalwrt/immortalwrt.git'
   WRT_BRANCH: 'v25.12.2'
   WRT_SOURCE: 'immortalwrt/immortalwrt'
@@ -245,6 +246,35 @@ jobs:
           $GITHUB_WORKSPACE/Scripts/Settings.sh
 
           mkdir -p files/etc/uci-defaults
+          mkdir -p files/etc
+          cp package/base-files/files/etc/shadow files/etc/shadow
+          ROOT_HASH="$(openssl passwd -6 "$WRT_PW")"
+          sed -i "s#^root:[^:]*:#root:${ROOT_HASH}:#" files/etc/shadow
+          grep -q '^root:\$6\$' files/etc/shadow
+
+          cat > files/etc/uci-defaults/98-h5000m-network-defaults <<'EOF'
+          #!/bin/sh
+          uci -q set network.lan.ipaddr='10.0.0.1'
+          uci -q commit network
+
+          for section in $(uci -q show wireless | sed -n "s/^wireless\.\([^=]*\)=wifi-iface$/\1/p"); do
+            device="$(uci -q get wireless."$section".device)"
+            band="$(uci -q get wireless."$device".band)"
+            case "$band" in
+              2g) ssid='H5KM' ;;
+              5g) ssid='H5KM+' ;;
+              *) continue ;;
+            esac
+            uci -q set wireless."$section".ssid="$ssid"
+            uci -q set wireless."$section".encryption='psk2'
+            uci -q set wireless."$section".key='password'
+            uci -q set wireless."$section".disabled='0'
+          done
+          uci -q commit wireless
+          exit 0
+          EOF
+          chmod 755 files/etc/uci-defaults/98-h5000m-network-defaults
+
           cat > files/etc/uci-defaults/99-h5000m-modem-owner <<'EOF'
           #!/bin/sh
           # Default owner is MT5700M. Enable QModem manually for other modules.
@@ -366,7 +396,8 @@ jobs:
             登录地址：${{env.WRT_IP}}
             登录密码：${{env.WRT_PW}}
 
-            WIFI 名称：${{env.WRT_SSID}}
+            2.4G WIFI 名称：${{env.WRT_SSID_2G}}
+            5G WIFI 名称：${{env.WRT_SSID_5G}}
             WIFI 密码：${{env.WRT_WORD}}
 
             内核版本：${{env.WRT_KVER}}
