@@ -125,7 +125,7 @@ jobs:
             PACKAGE_luci-app-openclash PACKAGE_luci-app-diskman \
             PACKAGE_luci-theme-argon PACKAGE_luci-app-argon-config \
             PACKAGE_qmodem PACKAGE_luci-app-qmodem-next \
-            PACKAGE_luci-app-qmodem-monitor PACKAGE_luci-app-qmodem-ttl \
+            PACKAGE_luci-app-qmodem-monitor PACKAGE_luci-app-qmodem-ttlfw4 \
             PACKAGE_luci-app-mt5700m PACKAGE_mt5700m-transport \
             PACKAGE_luci-app-h5000m-fancontrol PACKAGE_luci-app-h5000m-netmode \
             PACKAGE_kmod-usb-net-rndis PACKAGE_kmod-usb-net-cdc-ncm \
@@ -135,6 +135,12 @@ jobs:
             grep -qx "CONFIG_${symbol}=y" .config || { echo "Required selection missing after defconfig: $symbol" >&2; exit 1; }
           done
 
+          for legacy in luci-app-qmodem luci-app-qmodem-ttl; do
+            if grep -qx "CONFIG_PACKAGE_${legacy}=y" .config; then
+              echo "Legacy QModem UI conflicts with the selected next/fw4 UI: $legacy" >&2
+              exit 1
+            fi
+          done
           cp .config "$GITHUB_WORKSPACE/config-resolved.txt"
 
       - name: Download source packages
@@ -162,7 +168,7 @@ jobs:
             fi
           done > output/FEEDS-COMMITS.txt
 
-          for package in luci-app-openclash luci-app-diskman luci-app-qmodem-next qmodem luci-app-qmodem-monitor luci-app-qmodem-ttl luci-app-mt5700m mt5700m-transport luci-app-h5000m-fancontrol luci-app-h5000m-netmode; do
+          for package in luci-app-openclash luci-app-diskman luci-app-qmodem-next qmodem luci-app-qmodem-monitor luci-app-qmodem-ttlfw4 luci-app-mt5700m mt5700m-transport luci-app-h5000m-fancontrol luci-app-h5000m-netmode; do
             grep -q "^${package} - " output/BUILT-PACKAGES.manifest || { echo "Required package missing from built image: $package" >&2; exit 1; }
           done
 

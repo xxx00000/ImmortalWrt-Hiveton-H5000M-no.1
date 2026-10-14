@@ -20,5 +20,5 @@ luci-app-smsforward	1.1-r1	QModem v3.3.0 SMS forwarding replaces old UI	included
 luci-app-modemwebui	1.0-r1	replaced by QModem and MT5700 UI; old webuiserver upstream is unverified	included as replacement
 luci-app-netdata	1.0-r1	daemon/app source compatibility not yet verified	pending
 luci-app-argon-config	26.028.32658~1874ef1	pinned Argon source	included
-luci-app-qmodem-ttlfw4	3.0.0-r1	QModem v3.3.0 TTL interface package	included as replacement
+luci-app-qmodem-ttlfw4	3.0.0-r1	QModem v3.3.0 native JS/fw4 TTL interface; excludes legacy Lua UI	included
 luci-app-eqos-mtk	25.170.79304~27c0f70	vendor MTK QoS dependencies not in official target	blocked
