@@ -1,0 +1,24 @@
+package	original_version	migration	current_build
+luci-app-watchcat	26.028.32658~1874ef1	rebuild from official feed	included
+luci-app-nlbwmon	26.028.32658~1874ef1	rebuild from official feed	included
+luci-app-autoreboot	26.028.32658~1874ef1	compatible source not yet verified	pending
+luci-app-qmodem-monitor	3.0.0-r1	QModem v3.3.0 feed	included
+luci-app-ttyd	26.028.32658~1874ef1	rebuild from official feed	included
+luci-app-diskman	0.2.13-r1	pinned sbwml source	included
+luci-app-gwswitch	1.0-r1	replaced by H5000M netmode control	included as replacement
+luci-app-zerotier	26.028.32658~1874ef1	rebuild from official feed	included
+luci-app-turboacc-mtk	25.341.14152~087f013	vendor HNAT/WED stack not in official mt76 target	blocked
+luci-app-firewall	26.036.36217~e5298af	rebuild from official feed	included
+luci-app-openclash	0.47.055	pinned upstream source; core remains separately versioned	included
+luci-app-qmodem-next	3.0.0-r1	QModem v3.3.0 feed	included
+luci-app-fancontrol	1.0-r1	replaced by H5000M fancontrol control	included as replacement
+luci-app-package-manager	26.028.32658~1874ef1	APK-compatible official LuCI package manager	included
+luci-app-quickstart	1.01.2	compatible source not yet verified	pending
+luci-app-store	0.1.32-1	legacy opkg/iStore dependencies require APK migration	blocked
+luci-app-wrtbwmon	2.0.13-r1	compatible source not yet verified	pending
+luci-app-smsforward	1.1-r1	QModem v3.3.0 SMS forwarding replaces old UI	included as replacement
+luci-app-modemwebui	1.0-r1	replaced by QModem and MT5700 UI; old webuiserver upstream is unverified	included as replacement
+luci-app-netdata	1.0-r1	daemon/app source compatibility not yet verified	pending
+luci-app-argon-config	26.028.32658~1874ef1	pinned Argon source	included
+luci-app-qmodem-ttlfw4	3.0.0-r1	QModem v3.3.0 TTL interface package	included as replacement
+luci-app-eqos-mtk	25.170.79304~27c0f70	vendor MTK QoS dependencies not in official target	blocked

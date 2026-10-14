@@ -1,0 +1,185 @@
+name: Hiveton H5000M full firmware
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ImmortalWrt 25.12.2 / H5000M
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    env:
+      SOURCE_REPO: https://github.com/immortalwrt/immortalwrt.git
+      SOURCE_REF: v25.12.2
+      SOURCE_COMMIT: 4fc16f2985a358bd43bb522e43f05395fcbd6ed5
+      QMODEM_COMMIT: 5cc80e5f9fc218cd50bef9749dc7d0027e8b3072
+      FANCONTROL_COMMIT: 9bab7f720627b7e00a04d448a37542691b6c65c7
+      MT5700M_COMMIT: 93f6a65e33bab1dde645d7abe0e85e8215ae140d
+      NETMODE_COMMIT: c6710f8fb536c84a6e8506d4acdaae4e8c763568
+      DISKMAN_COMMIT: be87fcb92c472821bcedbefbfc8b7e8d9e039449
+      ARGON_COMMIT: 4b8b7849551c558ec905c40b0ebb864641c9fa32
+      OPENCLASH_COMMIT: 373d0023c7006fee3bb66c90f40355ef02e2d682
+      ROOT_PASSWORD: password
+
+    steps:
+      - name: Check out build configuration
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Test image safety checks
+        run: python3 -m unittest discover -s tests -v
+
+      - name: Prepare Ubuntu build host
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y dos2unix libfuse-dev
+          for attempt in 1 2 3; do
+            timeout 600 sudo bash -c 'bash <(curl -fsSL --retry 3 --connect-timeout 30 https://build-scripts.immortalwrt.org/init_build_environment.sh)' && break
+            if [ "$attempt" -eq 3 ]; then exit 1; fi
+            sleep 10
+          done
+          sudo mkdir -p /mnt/build_wrt
+          sudo chown "$USER:$USER" /mnt/build_wrt
+          ln -s /mnt/build_wrt "$GITHUB_WORKSPACE/wrt"
+
+      - name: Fetch pinned ImmortalWrt source
+        run: |
+          git clone --depth=1 --single-branch --branch "$SOURCE_REF" "$SOURCE_REPO" wrt/
+          test "$(git -C wrt rev-parse HEAD)" = "$SOURCE_COMMIT"
+          git -C wrt log -1 --format='%H %s' > wrt/SOURCE-COMMIT.txt
+
+      - name: Install pinned feeds
+        run: |
+          cd wrt
+          sed -i '/^src-.*[[:space:]]video[[:space:]]/d' feeds.conf.default
+          printf '\nsrc-git qmodem https://github.com/FUjr/QModem.git^%s\n' "$QMODEM_COMMIT" >> feeds.conf.default
+          ./scripts/feeds update -a
+          rm -rf feeds/packages/sound/squeezelite
+          test "$(git -C feeds/qmodem rev-parse HEAD)" = "$QMODEM_COMMIT"
+          grep -qx 'QMODEM_VERSION:=3.3.0' feeds/qmodem/version.mk
+          ./scripts/feeds install -a
+
+      - name: Add pinned H5000M and original plugins
+        run: |
+          cd wrt
+          clone_commit() {
+            url="$1"
+            directory="$2"
+            commit="$3"
+            git init "$directory"
+            git -C "$directory" remote add origin "$url"
+            git -C "$directory" fetch --depth=1 origin "$commit"
+            git -C "$directory" checkout --detach FETCH_HEAD
+            test "$(git -C "$directory" rev-parse HEAD)" = "$commit"
+          }
+
+          clone_commit https://github.com/FAN789/luci-app-h5000m-fancontrol.git package/luci-app-h5000m-fancontrol "$FANCONTROL_COMMIT"
+          clone_commit https://github.com/FAN789/luci-app-mt5700m.git package/luci-app-mt5700m "$MT5700M_COMMIT"
+          clone_commit https://github.com/FAN789/luci-app-h5000m-netmode.git package/luci-app-h5000m-netmode "$NETMODE_COMMIT"
+
+          mkdir -p /tmp/h5000m-source
+          clone_commit https://github.com/sbwml/luci-app-diskman.git /tmp/h5000m-source/diskman "$DISKMAN_COMMIT"
+          cp -a /tmp/h5000m-source/diskman/luci-app-diskman package/luci-app-diskman
+
+          clone_commit https://github.com/sbwml/luci-theme-argon.git /tmp/h5000m-source/argon "$ARGON_COMMIT"
+          cp -a /tmp/h5000m-source/argon/luci-theme-argon package/luci-theme-argon
+          cp -a /tmp/h5000m-source/argon/luci-app-argon-config package/luci-app-argon-config
+
+          clone_commit https://github.com/vernesong/OpenClash.git /tmp/h5000m-source/openclash "$OPENCLASH_COMMIT"
+          cp -a /tmp/h5000m-source/openclash/luci-app-openclash package/luci-app-openclash
+
+          mkdir -p files
+          cp -a "$GITHUB_WORKSPACE/files/." files/
+          install -Dm644 "$GITHUB_WORKSPACE/baseline/plugins.tsv" files/usr/share/h5000m-baseline/plugins.tsv
+          chmod 755 files/etc/uci-defaults/99-h5000m-defaults
+          chmod 755 files/etc/init.d/h5000m-defaults
+          chmod 755 files/usr/libexec/h5000m-firstboot
+
+          mkdir -p files/etc
+          cp package/base-files/files/etc/shadow files/etc/shadow
+          root_hash="$(openssl passwd -6 "$ROOT_PASSWORD")"
+          sed -i "s|^root:[^:]*:|root:${root_hash}:|" files/etc/shadow
+          chmod 600 files/etc/shadow
+          grep -q '^root:\$6\$' files/etc/shadow
+
+          bash -n "$GITHUB_WORKSPACE/files/etc/uci-defaults/99-h5000m-defaults"
+          bash -n "$GITHUB_WORKSPACE/files/etc/init.d/h5000m-defaults"
+          bash -n "$GITHUB_WORKSPACE/files/usr/libexec/h5000m-firstboot"
+          python3 -m py_compile "$GITHUB_WORKSPACE/scripts/validate-image.py"
+
+      - name: Configure H5000M image
+        run: |
+          cd wrt
+          cat "$GITHUB_WORKSPACE/config/h5000m.config" >> .config
+          make defconfig
+
+          for symbol in \
+            TARGET_DEVICE_mediatek_filogic_DEVICE_hiveton_h5000m \
+            PACKAGE_luci-app-firewall PACKAGE_luci-app-package-manager \
+            PACKAGE_luci-app-openclash PACKAGE_luci-app-diskman \
+            PACKAGE_luci-theme-argon PACKAGE_luci-app-argon-config \
+            PACKAGE_qmodem PACKAGE_luci-app-qmodem-next \
+            PACKAGE_luci-app-qmodem-monitor PACKAGE_luci-app-qmodem-ttl \
+            PACKAGE_luci-app-mt5700m PACKAGE_mt5700m-transport \
+            PACKAGE_luci-app-h5000m-fancontrol PACKAGE_luci-app-h5000m-netmode \
+            PACKAGE_kmod-usb-net-rndis PACKAGE_kmod-usb-net-cdc-ncm \
+            PACKAGE_kmod-usb-net-cdc-mbim PACKAGE_kmod-usb-net-qmi-wwan \
+            PACKAGE_kmod-mhi-pci-generic PACKAGE_kmod-mhi-wwan-ctrl \
+            PACKAGE_kmod-mhi-wwan-mbim PACKAGE_kmod-mtk-t7xx; do
+            grep -qx "CONFIG_${symbol}=y" .config || { echo "Required selection missing after defconfig: $symbol" >&2; exit 1; }
+          done
+
+          cp .config "$GITHUB_WORKSPACE/config-resolved.txt"
+
+      - name: Download source packages
+        run: |
+          cd wrt
+          make download -j"$(nproc)"
+
+      - name: Compile full firmware
+        run: |
+          cd wrt
+          make -j"$(nproc)" || make -j1 V=s
+
+      - name: Verify and package full H5000M image
+        run: |
+          python3 "$GITHUB_WORKSPACE/scripts/validate-image.py" "$GITHUB_WORKSPACE/wrt" "$GITHUB_WORKSPACE/output"
+          find wrt/bin/targets/mediatek/filogic -name '*.manifest' -exec cat {} + > output/BUILT-PACKAGES.manifest
+          cp wrt/SOURCE-COMMIT.txt output/
+          cp baseline/all-packages.tsv output/ORIGINAL-PACKAGES.tsv
+          cp config-resolved.txt output/
+          cp baseline/plugins.tsv output/
+          cp wrt/feeds.conf.default output/
+          for feed in wrt/feeds/*; do
+            if [ -d "$feed/.git" ]; then
+              printf '%s %s\n' "${feed#wrt/}" "$(git -C "$feed" rev-parse HEAD)"
+            fi
+          done > output/FEEDS-COMMITS.txt
+
+          for package in luci-app-openclash luci-app-diskman luci-app-qmodem-next qmodem luci-app-qmodem-monitor luci-app-qmodem-ttl luci-app-mt5700m mt5700m-transport luci-app-h5000m-fancontrol luci-app-h5000m-netmode; do
+            grep -q "^${package} - " output/BUILT-PACKAGES.manifest || { echo "Required package missing from built image: $package" >&2; exit 1; }
+          done
+
+          {
+            echo "QMODEM_COMMIT=$QMODEM_COMMIT"
+            echo "FANCONTROL_COMMIT=$FANCONTROL_COMMIT"
+            echo "MT5700M_COMMIT=$MT5700M_COMMIT"
+            echo "NETMODE_COMMIT=$NETMODE_COMMIT"
+            echo "DISKMAN_COMMIT=$DISKMAN_COMMIT"
+            echo "ARGON_COMMIT=$ARGON_COMMIT"
+            echo "OPENCLASH_COMMIT=$OPENCLASH_COMMIT"
+          } > output/PLUGIN-COMMITS.txt
+
+      - name: Upload complete firmware artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: H5000M-ImmortalWrt-25.12.2-${{ github.run_id }}
+          path: output/
+          if-no-files-found: error
+          retention-days: 14

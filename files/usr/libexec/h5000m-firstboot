@@ -1,0 +1,69 @@
+#!/bin/sh
+
+DONE=/etc/h5000m-firstboot.done
+[ -e "$DONE" ] && exit 0
+
+logger -t h5000m-firstboot 'Applying AU Wi-Fi defaults'
+attempt=0
+while [ "$attempt" -lt 60 ]; do
+	if ! uci -q show wireless | grep -q '=wifi-device$'; then
+		wifi config >/dev/null 2>&1 || true
+	fi
+
+	found_2g=0
+	found_5g=0
+	for device in $(uci -q show wireless | sed -n 's/^wireless\.\([^=]*\)=wifi-device$/\1/p'); do
+		band="$(uci -q get "wireless.$device.band" 2>/dev/null || true)"
+		case "$band" in
+			2g)
+				ssid='A3KM'
+				htmode='HE20'
+				found_2g=1
+				;;
+			5g)
+				ssid='A3KM+'
+				htmode='HE160'
+				found_5g=1
+				;;
+			*) continue ;;
+		esac
+
+		uci -q set "wireless.$device.disabled=0"
+		uci -q set "wireless.$device.country=AU"
+		uci -q set "wireless.$device.channel=auto"
+		uci -q set "wireless.$device.htmode=$htmode"
+
+		ap=''
+		for section in $(uci -q show wireless | sed -n 's/^wireless\.\([^=]*\)=wifi-iface$/\1/p'); do
+			[ "$(uci -q get "wireless.$section.device" 2>/dev/null || true)" = "$device" ] || continue
+			[ "$(uci -q get "wireless.$section.mode" 2>/dev/null || true)" = 'ap' ] || continue
+			[ "$(uci -q get "wireless.$section.network" 2>/dev/null || true)" = 'lan' ] || continue
+			ap="$section"
+			break
+		done
+		[ -n "$ap" ] || ap="$(uci add wireless wifi-iface)"
+		uci -q set "wireless.$ap.device=$device"
+		uci -q set "wireless.$ap.mode=ap"
+		uci -q set "wireless.$ap.network=lan"
+		uci -q set "wireless.$ap.ssid=$ssid"
+		uci -q set "wireless.$ap.encryption=psk2"
+		uci -q set "wireless.$ap.key=password"
+		uci -q set "wireless.$ap.disabled=0"
+	done
+
+	if [ "$found_2g" -eq 1 ] && [ "$found_5g" -eq 1 ]; then
+		uci -q commit wireless
+		if wifi reload >/dev/null 2>&1; then
+			: > "$DONE"
+			logger -t h5000m-firstboot 'Both AU radios configured; 5GHz requests HE160'
+			exit 0
+		fi
+		logger -t h5000m-firstboot 'wifi reload failed; will retry'
+	fi
+
+	attempt=$((attempt + 1))
+	sleep 10
+done
+
+logger -t h5000m-firstboot 'Timed out waiting for 2.4GHz and 5GHz radios'
+exit 1

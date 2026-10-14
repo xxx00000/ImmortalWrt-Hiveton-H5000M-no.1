@@ -1,0 +1,22 @@
+#!/bin/sh
+
+# Keep the device-specific LAN bridge/port mapping created by the board files.
+uci -q set network.lan.proto='static'
+uci -q set network.lan.ipaddr='10.0.0.1'
+uci -q set network.lan.netmask='255.255.255.0'
+
+uci -q set dhcp.lan='dhcp'
+uci -q set dhcp.lan.interface='lan'
+uci -q set dhcp.lan.ignore='0'
+uci -q set dhcp.lan.start='100'
+uci -q set dhcp.lan.limit='150'
+uci -q set dhcp.lan.leasetime='12h'
+
+uci -q commit network
+uci -q commit dhcp
+
+# The board's radio configuration may be created later in the boot sequence.
+# A late-start helper waits for both bands before writing wireless defaults.
+/etc/init.d/h5000m-defaults enable
+
+exit 0
