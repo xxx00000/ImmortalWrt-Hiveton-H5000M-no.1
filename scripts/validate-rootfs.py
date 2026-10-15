@@ -1,5 +1,6 @@
 """Inspect the shipped SquashFS, not only the generic build manifest."""
 import io
+import hashlib
 import json
 import pathlib
 import re
@@ -21,6 +22,13 @@ def require_aarch64(data, name):
         raise ValueError(f'{name}: expected aarch64 ELF64 little-endian backend')
 
 
+def validate_argon_assets(files, baseline):
+    mismatches = [name for name, digest in baseline.items()
+                  if name not in files or hashlib.sha256(files[name]).hexdigest() != digest]
+    if mismatches:
+        raise ValueError('Original Argon assets differ: ' + ', '.join(mismatches))
+
+
 def main(root, output):
     from dissect.squashfs import SquashFS
     from passlib.hash import sha512_crypt
@@ -35,8 +43,9 @@ def main(root, output):
             paths.add(name)
             if entry.is_dir():
                 walk(entry, name + '/')
-            elif entry.is_file() and (name.startswith(('etc/uci-defaults/', 'usr/libexec/h5000m', 'usr/share/luci/menu.d/')) or name in (
+            elif entry.is_file() and (name.startswith(('etc/uci-defaults/', 'usr/libexec/h5000m', 'usr/share/luci/menu.d/', 'www/luci-static/argon/', 'usr/share/ucode/luci/template/themes/argon/')) or name in (
                 'lib/apk/db/installed', 'usr/bin/at-webserver-rust', 'usr/sbin/fm350d', 'etc/shadow',
+                'etc/config/argon',
                 'usr/share/ucode/luci/template/themes/argon/header.ut')):
                 files[name] = entry.open().read()
     walk(fs.root)
@@ -67,6 +76,8 @@ def main(root, output):
     header = files.get('usr/share/ucode/luci/template/themes/argon/header.ut', b'')
     if b'Hiveton H5000M' not in header:
         raise ValueError('Requested sidebar brand absent')
+    baseline = json.loads((pathlib.Path(__file__).resolve().parents[1]/'baseline/argon-original-assets.json').read_text(encoding='utf-8'))
+    validate_argon_assets(files, baseline['sha256'])
     menu = json.loads(files['usr/share/luci/menu.d/zz-h5000m-overview.json'])
     if menu['admin/status/overview']['action'] != {'type':'template', 'path':'quickstart/home'}:
         raise ValueError('QuickStart overview route absent')
@@ -74,6 +85,7 @@ def main(root, output):
     (output/'STATIC-ACCEPTANCE.json').write_text(json.dumps({
         'status':'passed', 'actual_package_count':len(packages), 'rust_backends':'aarch64',
         'root_password_verified':password_ok, 'brand':'Hiveton H5000M',
+        'argon_theme':'original 2.4.7; original assets verified by SHA256',
         'wifi':['AU EHT20 A5kM', 'AU EHT160 A5kM+'],
         'modem_managers':'A1/B1/C1; exclusive ownership; MT5700 default',
         'runtime_hardware_test':'required', 'uboot_acceptance':'not tested by CI'}, indent=2), encoding='utf-8')

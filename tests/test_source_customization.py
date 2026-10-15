@@ -39,6 +39,15 @@ class SourceCustomizationTests(unittest.TestCase):
         self.assertIn('<title>{{ hostname }}</title>', out)
         self.assertIn('>Hiveton H5000M</a>', out)
 
+    def test_original_argon_brand_preserves_all_markup_and_typography(self):
+        m = self.load()
+        text = '<title>{{ hostname }}</title><a class="brand" href="#">{{ hostname }}</a>'
+        self.assertEqual(m.brand_header(text), text.replace('>{{ hostname }}</a>', '>Hiveton H5000M</a>'))
+
+    def test_branding_does_not_add_font_or_size_overrides(self):
+        text = '<a class="brand" href="/" aria-label="Router">{{ hostname }}</a>'
+        self.assertEqual(self.load().brand_header(text), text.replace('{{ hostname }}', 'Hiveton H5000M'))
+
     def test_hotplug_is_guarded_before_any_scan(self):
         m = self.load()
         with tempfile.TemporaryDirectory() as directory:

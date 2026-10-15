@@ -45,6 +45,7 @@
 ## 本次定制
 
 - 左上角品牌：Hiveton H5000M。
+- Argon 恢复为此前固件使用的 ImmortalWrt LuCI feed 版本 2.4.7，字体和排版保持原样；只替换品牌文字，不增加字体或字号覆盖。镜像验收逐项校验原版主题资源的 SHA256。
 - MT5700：luci-app-mt5700 v1.14.21（A1）。
 - 移远 RM500Q/RM520N：luci-app-qmodem-generic v2.5.0-r2 + QModem 3.3.0（B1）。
 - 广和通 FM350：luci-app-fm350 v1.0.16（C1，上游开发验证阶段）。

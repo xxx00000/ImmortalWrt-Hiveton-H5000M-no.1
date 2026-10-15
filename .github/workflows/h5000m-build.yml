@@ -30,7 +30,7 @@ jobs:
       CARGO_BUILD_JOBS: 2
       NETMODE_COMMIT: c6710f8fb536c84a6e8506d4acdaae4e8c763568
       DISKMAN_COMMIT: be87fcb92c472821bcedbefbfc8b7e8d9e039449
-      ARGON_COMMIT: 4b8b7849551c558ec905c40b0ebb864641c9fa32
+      ARGON_COMMIT: d6167ea0645cbd1327708d85f94824f42d0eb872
       OPENCLASH_COMMIT: 373d0023c7006fee3bb66c90f40355ef02e2d682
       ROOT_PASSWORD: password
 
@@ -117,9 +117,12 @@ jobs:
           clone_commit https://github.com/sbwml/luci-app-diskman.git /tmp/h5000m-source/diskman "$DISKMAN_COMMIT"
           cp -a /tmp/h5000m-source/diskman/luci-app-diskman package/luci-app-diskman
 
-          clone_commit https://github.com/sbwml/luci-theme-argon.git /tmp/h5000m-source/argon "$ARGON_COMMIT"
-          cp -a /tmp/h5000m-source/argon/luci-theme-argon package/luci-theme-argon
-          cp -a /tmp/h5000m-source/argon/luci-app-argon-config package/luci-app-argon-config
+          # Restore the exact Argon theme/config sources used by the accepted original image.
+          test "$(git -C feeds/luci rev-parse HEAD)" = "$ARGON_COMMIT"
+          cp -a feeds/luci/themes/luci-theme-argon package/luci-theme-argon
+          cp -a feeds/luci/applications/luci-app-argon-config package/luci-app-argon-config
+          # Keep the original LuCI include valid after moving the two packages.
+          sed -i 's|^include ../../luci.mk$|include $(TOPDIR)/feeds/luci/luci.mk|' package/luci-theme-argon/Makefile package/luci-app-argon-config/Makefile
 
           clone_commit https://github.com/vernesong/OpenClash.git /tmp/h5000m-source/openclash "$OPENCLASH_COMMIT"
           cp -a /tmp/h5000m-source/openclash/luci-app-openclash package/luci-app-openclash
@@ -214,6 +217,7 @@ jobs:
           cp baseline/all-packages.tsv output/ORIGINAL-PACKAGES.tsv
           cp config-resolved.txt output/
           cp baseline/plugins.tsv output/
+          cp baseline/argon-original-assets.json output/
           cp wrt/feeds.conf.default output/
           for feed in wrt/feeds/*; do
             if [ -d "$feed/.git" ]; then

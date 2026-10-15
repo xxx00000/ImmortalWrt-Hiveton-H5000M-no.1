@@ -18,8 +18,8 @@ def guard_service(path, owner):
 
 
 def brand_header(text):
-    result, count = re.subn(r'(<a class="brand" href="/")[^>]*>\s*\{\{ hostname \}\}</a>',
-                           r'\1 style="font-family:system-ui,sans-serif;font-size:22px">Hiveton H5000M</a>', text)
+    result, count = re.subn(r'(<a\b[^>]*\bclass="brand"[^>]*>\s*)\{\{\s*hostname\s*\}\}(\s*</a>)',
+                           lambda match: match[1] + 'Hiveton H5000M' + match[2], text)
     if not count:
         raise ValueError('Argon brand anchors not found')
     return result
