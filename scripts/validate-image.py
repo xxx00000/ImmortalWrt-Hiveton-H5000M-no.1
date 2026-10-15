@@ -40,7 +40,7 @@ digest = hashlib.sha256(destination.read_bytes()).hexdigest()
     "Bootloader: U-Boot acceptance was confirmed for the reference image; verify this file's size against the device upload limit before flashing\n"
     f"Size: {destination.stat().st_size} bytes\n"
     f"SHA256: {digest}\n"
-    "Wi-Fi: country AU; 5GHz HE160 requested; hardware/client validation is still required\n",
+    "Wi-Fi: country AU; 2.4GHz A5KM EHT40; 5GHz A5KM+ EHT160; WPA2-PSK; hardware/client validation is still required\n",
     encoding="utf-8",
 )
 print(f"Validated {destination.name} ({destination.stat().st_size} bytes, SHA256 {digest})")
