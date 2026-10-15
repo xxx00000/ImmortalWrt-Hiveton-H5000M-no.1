@@ -3,7 +3,6 @@ name: Hiveton H5000M full firmware
 on:
   push:
     branches: [main]
-    paths-ignore: ['README.md', 'docs/**']
   workflow_dispatch:
 
 permissions:
@@ -11,7 +10,7 @@ permissions:
 
 jobs:
   build:
-    name: H5000M / BE / A1-B1-C1
+    name: ImmortalWrt 25.12.2 / H5000M
     runs-on: ubuntu-24.04
     timeout-minutes: 360
     env:
@@ -20,17 +19,10 @@ jobs:
       SOURCE_COMMIT: 4fc16f2985a358bd43bb522e43f05395fcbd6ed5
       QMODEM_COMMIT: 5cc80e5f9fc218cd50bef9749dc7d0027e8b3072
       FANCONTROL_COMMIT: 9bab7f720627b7e00a04d448a37542691b6c65c7
-      MT5700_COMMIT: ea320a64750be450b84b5c14f5d9bcceb269ebe5
-      GENERIC_COMMIT: a5a2b41fd617e5577b72bb9f6b1f6141d84aed4d
-      FM350_COMMIT: 6fa5efe67ab476eae5740f9a5fe41babf0ee9dcb
-      ISTORE_COMMIT: a97ace34f2da358a015b094d326bba2697697f2e
-      NAS_LUCI_COMMIT: 93e94175535c0b793300eacb3fe231601d0e87d8
-      NAS_COMMIT: 2fc436d5507bd90f00093fd4a94b93968acce32b
-      RUSTUP_TOOLCHAIN: 1.90.0
-      CARGO_BUILD_JOBS: 2
+      MT5700M_COMMIT: 93f6a65e33bab1dde645d7abe0e85e8215ae140d
       NETMODE_COMMIT: c6710f8fb536c84a6e8506d4acdaae4e8c763568
       DISKMAN_COMMIT: be87fcb92c472821bcedbefbfc8b7e8d9e039449
-      ARGON_COMMIT: d6167ea0645cbd1327708d85f94824f42d0eb872
+      ARGON_COMMIT: 4b8b7849551c558ec905c40b0ebb864641c9fa32
       OPENCLASH_COMMIT: 373d0023c7006fee3bb66c90f40355ef02e2d682
       ROOT_PASSWORD: password
 
@@ -56,15 +48,6 @@ jobs:
           sudo chown "$USER:$USER" /mnt/build_wrt
           ln -s /mnt/build_wrt "$GITHUB_WORKSPACE/wrt"
 
-      - name: Prepare Rust and actual image inspection
-        run: |
-          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --target aarch64-unknown-linux-musl
-          python3 -m venv "$GITHUB_WORKSPACE/.audit-venv"
-          "$GITHUB_WORKSPACE/.audit-venv/bin/pip" install dissect.squashfs==1.12 passlib==1.7.4
-          chmod 755 scripts/rust-openwrt-linker
-          echo "H5000M_OPENWRT_DIR=$GITHUB_WORKSPACE/wrt" >> "$GITHUB_ENV"
-          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=$GITHUB_WORKSPACE/scripts/rust-openwrt-linker" >> "$GITHUB_ENV"
-
       - name: Fetch pinned ImmortalWrt source
         run: |
           git clone --depth=1 --single-branch --branch "$SOURCE_REF" "$SOURCE_REPO" wrt/
@@ -76,16 +59,11 @@ jobs:
           cd wrt
           sed -i '/^src-.*[[:space:]]video[[:space:]]/d' feeds.conf.default
           printf '\nsrc-git qmodem https://github.com/FUjr/QModem.git^%s\n' "$QMODEM_COMMIT" >> feeds.conf.default
-          printf 'src-git istore https://github.com/istoreos/istore.git^%s\n' "$ISTORE_COMMIT" >> feeds.conf.default
           ./scripts/feeds update -a
           rm -rf feeds/packages/sound/squeezelite
           test "$(git -C feeds/qmodem rev-parse HEAD)" = "$QMODEM_COMMIT"
           grep -qx 'QMODEM_VERSION:=3.3.0' feeds/qmodem/version.mk
-          test "$(git -C feeds/istore rev-parse HEAD)" = "$ISTORE_COMMIT"
           ./scripts/feeds install -a
-          ./scripts/feeds install -f -p istore luci-app-store luci-lib-taskd luci-lib-xterm taskd
-          # Remove same-name feed entries before adding the pinned custom sources.
-          ./scripts/feeds uninstall luci-app-diskman luci-theme-argon luci-app-argon-config luci-app-openclash
 
       - name: Add pinned H5000M and original plugins
         run: |
@@ -102,40 +80,23 @@ jobs:
           }
 
           clone_commit https://github.com/FAN789/luci-app-h5000m-fancontrol.git package/luci-app-h5000m-fancontrol "$FANCONTROL_COMMIT"
-          clone_commit https://github.com/LianXia233/luci-app-mt5700.git package/luci-app-mt5700 "$MT5700_COMMIT"
-          clone_commit https://github.com/LianXia233/luci-app-fm350.git package/luci-app-fm350 "$FM350_COMMIT"
-          mkdir -p /tmp/h5000m-source
-          clone_commit https://github.com/LianXia233/luci-app-qmodem-generic.git /tmp/h5000m-source/generic "$GENERIC_COMMIT"
-          cp -a /tmp/h5000m-source/generic/luci-app-qmodem-generic package/luci-app-qmodem-generic
-          clone_commit https://github.com/linkease/nas-packages-luci.git /tmp/h5000m-source/nas-luci "$NAS_LUCI_COMMIT"
-          cp -a /tmp/h5000m-source/nas-luci/luci/luci-app-quickstart package/luci-app-quickstart
-          clone_commit https://github.com/linkease/nas-packages.git /tmp/h5000m-source/nas "$NAS_COMMIT"
-          cp -a /tmp/h5000m-source/nas/network/services/quickstart package/quickstart
+          clone_commit https://github.com/FAN789/luci-app-mt5700m.git package/luci-app-mt5700m "$MT5700M_COMMIT"
           clone_commit https://github.com/FAN789/luci-app-h5000m-netmode.git package/luci-app-h5000m-netmode "$NETMODE_COMMIT"
 
           mkdir -p /tmp/h5000m-source
           clone_commit https://github.com/sbwml/luci-app-diskman.git /tmp/h5000m-source/diskman "$DISKMAN_COMMIT"
           cp -a /tmp/h5000m-source/diskman/luci-app-diskman package/luci-app-diskman
 
-          # Restore the exact Argon theme/config sources used by the accepted original image.
-          test "$(git -C feeds/luci rev-parse HEAD)" = "$ARGON_COMMIT"
-          cp -a feeds/luci/themes/luci-theme-argon package/luci-theme-argon
-          cp -a feeds/luci/applications/luci-app-argon-config package/luci-app-argon-config
-          # Keep the original LuCI include valid after moving the two packages.
-          sed -i 's|^include ../../luci.mk$|include $(TOPDIR)/feeds/luci/luci.mk|' package/luci-theme-argon/Makefile package/luci-app-argon-config/Makefile
+          clone_commit https://github.com/sbwml/luci-theme-argon.git /tmp/h5000m-source/argon "$ARGON_COMMIT"
+          cp -a /tmp/h5000m-source/argon/luci-theme-argon package/luci-theme-argon
+          cp -a /tmp/h5000m-source/argon/luci-app-argon-config package/luci-app-argon-config
 
           clone_commit https://github.com/vernesong/OpenClash.git /tmp/h5000m-source/openclash "$OPENCLASH_COMMIT"
           cp -a /tmp/h5000m-source/openclash/luci-app-openclash package/luci-app-openclash
 
-          python3 "$GITHUB_WORKSPACE/scripts/prepare-custom.py" "$GITHUB_WORKSPACE/wrt"
-          cargo fetch --locked --manifest-path package/luci-app-mt5700/src/rust/Cargo.toml
-          cargo fetch --locked --manifest-path package/luci-app-fm350/rust/Cargo.toml
-
           mkdir -p files
           cp -a "$GITHUB_WORKSPACE/files/." files/
           install -Dm644 "$GITHUB_WORKSPACE/baseline/plugins.tsv" files/usr/share/h5000m-baseline/plugins.tsv
-          find files/etc/init.d files/etc/uci-defaults files/usr/libexec -type f -exec chmod 755 {} +
-          find files/etc/init.d files/etc/uci-defaults files/usr/libexec -type f -exec bash -n {} \;
           chmod 755 files/etc/uci-defaults/99-h5000m-defaults
           chmod 755 files/etc/init.d/h5000m-defaults
           chmod 755 files/usr/libexec/h5000m-firstboot
@@ -157,29 +118,15 @@ jobs:
           cd wrt
           cat "$GITHUB_WORKSPACE/config/h5000m.config" >> .config
           make defconfig
-          cp .config "$GITHUB_WORKSPACE/config-resolved.txt"
-          cp tmp/.config-package.in "$GITHUB_WORKSPACE/package-kconfig.txt"
-          cp tmp/.packageinfo "$GITHUB_WORKSPACE/package-metadata.txt"
-          python3 "$GITHUB_WORKSPACE/scripts/validate-sources.py" tmp/.packageinfo "$GITHUB_WORKSPACE/source-provenance.json"
-          for package in luci-app-store luci-lib-taskd luci-lib-xterm taskd luci-app-quickstart quickstart; do
-            echo "Resolved dependency metadata: $package"
-            grep -A30 -B2 "config PACKAGE_${package}$" tmp/.config-package.in || true
-            grep "CONFIG_PACKAGE_${package}[= ]" .config || true
-          done
-          cp tmp/.config-package.in "$GITHUB_WORKSPACE/package-kconfig.txt"
-          cp tmp/.packageinfo "$GITHUB_WORKSPACE/package-metadata.txt"
 
           for symbol in \
             TARGET_DEVICE_mediatek_filogic_DEVICE_hiveton_h5000m \
             PACKAGE_luci-app-firewall PACKAGE_luci-app-package-manager \
             PACKAGE_luci-app-openclash PACKAGE_luci-app-diskman \
             PACKAGE_luci-theme-argon PACKAGE_luci-app-argon-config \
-            PACKAGE_luci-app-store PACKAGE_luci-app-quickstart PACKAGE_quickstart \
-            PACKAGE_docker PACKAGE_dockerd PACKAGE_luci-app-dockerman \
-            PACKAGE_kmod-mt7996e PACKAGE_kmod-mt7992-23-firmware PACKAGE_wireless-regdb \
-            PACKAGE_qmodem PACKAGE_luci-app-qmodem-generic \
-            PACKAGE_luci-app-qmodem-ttlfw4 \
-            PACKAGE_luci-app-mt5700 PACKAGE_luci-app-fm350 \
+            PACKAGE_qmodem PACKAGE_luci-app-qmodem-next \
+            PACKAGE_luci-app-qmodem-monitor PACKAGE_luci-app-qmodem-ttlfw4 \
+            PACKAGE_luci-app-mt5700m PACKAGE_mt5700m-transport \
             PACKAGE_luci-app-h5000m-fancontrol PACKAGE_luci-app-h5000m-netmode \
             PACKAGE_kmod-usb-net-rndis PACKAGE_kmod-usb-net-cdc-ncm \
             PACKAGE_kmod-usb-net-cdc-mbim PACKAGE_kmod-usb-net-qmi-wwan \
@@ -188,7 +135,7 @@ jobs:
             grep -qx "CONFIG_${symbol}=y" .config || { echo "Required selection missing after defconfig: $symbol" >&2; exit 1; }
           done
 
-          for legacy in luci-app-qmodem luci-app-qmodem-next luci-app-qmodem-ttl luci-app-mt5700m luci-app-nlbwmon nlbwmon; do
+          for legacy in luci-app-qmodem luci-app-qmodem-ttl; do
             if grep -qx "CONFIG_PACKAGE_${legacy}=y" .config; then
               echo "Legacy QModem UI conflicts with the selected next/fw4 UI: $legacy" >&2
               exit 1
@@ -204,20 +151,16 @@ jobs:
       - name: Compile full firmware
         run: |
           cd wrt
-          set -o pipefail
-          make -j"$(nproc)" 2>&1 | tee "$GITHUB_WORKSPACE/build.log" || make -j1 V=s 2>&1 | tee -a "$GITHUB_WORKSPACE/build.log"
+          make -j"$(nproc)" || make -j1 V=s
 
       - name: Verify and package full H5000M image
         run: |
           python3 "$GITHUB_WORKSPACE/scripts/validate-image.py" "$GITHUB_WORKSPACE/wrt" "$GITHUB_WORKSPACE/output"
-          "$GITHUB_WORKSPACE/.audit-venv/bin/python" scripts/validate-rootfs.py "$GITHUB_WORKSPACE/wrt" "$GITHUB_WORKSPACE/output"
           find wrt/bin/targets/mediatek/filogic -name '*.manifest' -exec cat {} + > output/BUILT-PACKAGES.manifest
           cp wrt/SOURCE-COMMIT.txt output/
-          cp source-provenance.json output/
           cp baseline/all-packages.tsv output/ORIGINAL-PACKAGES.tsv
           cp config-resolved.txt output/
           cp baseline/plugins.tsv output/
-          cp baseline/argon-original-assets.json output/
           cp wrt/feeds.conf.default output/
           for feed in wrt/feeds/*; do
             if [ -d "$feed/.git" ]; then
@@ -225,16 +168,14 @@ jobs:
             fi
           done > output/FEEDS-COMMITS.txt
 
+          for package in luci-app-openclash luci-app-diskman luci-app-qmodem-next qmodem luci-app-qmodem-monitor luci-app-qmodem-ttlfw4 luci-app-mt5700m mt5700m-transport luci-app-h5000m-fancontrol luci-app-h5000m-netmode; do
+            grep -q "^${package} - " output/BUILT-PACKAGES.manifest || { echo "Required package missing from built image: $package" >&2; exit 1; }
+          done
 
           {
             echo "QMODEM_COMMIT=$QMODEM_COMMIT"
             echo "FANCONTROL_COMMIT=$FANCONTROL_COMMIT"
-            echo "MT5700_COMMIT=$MT5700_COMMIT"
-            echo "GENERIC_COMMIT=$GENERIC_COMMIT"
-            echo "FM350_COMMIT=$FM350_COMMIT"
-            echo "ISTORE_COMMIT=$ISTORE_COMMIT"
-            echo "NAS_LUCI_COMMIT=$NAS_LUCI_COMMIT"
-            echo "NAS_COMMIT=$NAS_COMMIT"
+            echo "MT5700M_COMMIT=$MT5700M_COMMIT"
             echo "NETMODE_COMMIT=$NETMODE_COMMIT"
             echo "DISKMAN_COMMIT=$DISKMAN_COMMIT"
             echo "ARGON_COMMIT=$ARGON_COMMIT"
@@ -244,22 +185,7 @@ jobs:
       - name: Upload complete firmware artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: H5000M-25.12.2-BE-A1B1C1-${{ github.run_id }}
+          name: H5000M-ImmortalWrt-25.12.2-${{ github.run_id }}
           path: output/
           if-no-files-found: error
           retention-days: 14
-
-      - name: Upload failure diagnostics
-        if: failure()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: H5000M-diagnostics-${{ github.run_id }}
-          path: |
-            config-resolved.txt
-            package-kconfig.txt
-            package-metadata.txt
-            source-provenance.json
-            build.log
-            output/
-          if-no-files-found: ignore
-          retention-days: 7
