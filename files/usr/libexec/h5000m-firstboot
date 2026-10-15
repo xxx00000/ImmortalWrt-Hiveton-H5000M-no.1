@@ -16,13 +16,13 @@ while [ "$attempt" -lt 60 ]; do
 		band="$(uci -q get "wireless.$device.band" 2>/dev/null || true)"
 		case "$band" in
 			2g)
-				ssid='A3KM'
-				htmode='HE20'
+				ssid='A5kM'
+				htmode='EHT20'
 				found_2g=1
 				;;
 			5g)
-				ssid='A3KM+'
-				htmode='HE160'
+				ssid='A5kM+'
+				htmode='EHT160'
 				found_5g=1
 				;;
 			*) continue ;;
@@ -55,7 +55,7 @@ while [ "$attempt" -lt 60 ]; do
 		uci -q commit wireless
 		if wifi reload >/dev/null 2>&1; then
 			: > "$DONE"
-			logger -t h5000m-firstboot 'Both AU radios configured; 5GHz requests HE160'
+			logger -t h5000m-firstboot 'Both AU radios configured; 5GHz requests EHT160'
 			exit 0
 		fi
 		logger -t h5000m-firstboot 'wifi reload failed; will retry'

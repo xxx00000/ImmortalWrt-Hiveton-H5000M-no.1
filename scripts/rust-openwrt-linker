@@ -1,0 +1,7 @@
+#!/bin/sh
+set -eu
+for compiler in "$H5000M_OPENWRT_DIR"/staging_dir/toolchain-*/bin/aarch64-openwrt-linux-musl-gcc; do
+	[ -x "$compiler" ] && exec "$compiler" "$@"
+done
+echo 'OpenWrt aarch64 musl linker not found' >&2
+exit 1

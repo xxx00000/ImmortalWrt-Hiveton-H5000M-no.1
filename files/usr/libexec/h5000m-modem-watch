@@ -1,0 +1,19 @@
+#!/bin/sh
+previous=''
+while :; do
+	owner="$(/usr/libexec/h5000m-modem-owner)"
+	if [ "$owner" != "$previous" ]; then
+		/usr/libexec/h5000m-modem-prepare "$owner"
+		case "$owner" in
+			mt5700) services='at-webserver' ;;
+			fm350) services='fm350d' ;;
+			quectel) services='qmodem_init qmodem_network qmodem-worker' ;;
+		esac
+		for service in $services; do
+			"/etc/init.d/$service" start >/dev/null 2>&1
+		done
+		logger -t h5000m-modem "Selected modem manager: $owner"
+		previous="$owner"
+	fi
+	sleep 5
+done

@@ -1,0 +1,7 @@
+{
+  "admin/status/overview": {
+    "title": "Overview",
+    "order": 1,
+    "action": {"type": "template", "path": "quickstart/home"}
+  }
+}

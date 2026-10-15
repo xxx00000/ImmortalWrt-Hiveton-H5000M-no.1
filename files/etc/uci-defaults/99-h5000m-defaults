@@ -18,5 +18,8 @@ uci -q commit dhcp
 # The board's radio configuration may be created later in the boot sequence.
 # A late-start helper waits for both bands before writing wireless defaults.
 /etc/init.d/h5000m-defaults enable
+/etc/init.d/h5000m-modem enable
+uci -q set luci.main.indexurl='/cgi-bin/luci/admin/status/overview'
+uci -q commit luci
 
 exit 0

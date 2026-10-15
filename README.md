@@ -22,10 +22,10 @@
 | LAN / 管理地址 | `10.0.0.1/24` / http://10.0.0.1 |
 | 用户名 / 密码 | `root` / `password` |
 | DHCP 地址池 | `10.0.0.100–249` |
-| 2.4GHz Wi-Fi | `A3KM`，密码 `password` |
-| 5GHz Wi-Fi | `A3KM+`，密码 `password` |
+| 2.4GHz Wi-Fi | `A5kM`，密码 `password` |
+| 5GHz Wi-Fi | `A5kM+`，密码 `password` |
 | 无线加密 | WPA2-PSK，双频启用 |
-| 无线地区 / 5GHz 模式 | `AU` / `HE160` |
+| 无线地区 / 5GHz 模式 | `AU` / `EHT160` |
 
 以上设置用于全新配置首次启动。160MHz 实际运行情况需使用支持该频宽的客户端验证。
 
@@ -40,3 +40,18 @@
 输出单个包含完整内核和根文件系统的 `.bin`，不含 Bootloader、分区表及 factory 校准数据。
 
 当前包内标识使用 `hiveton_h5000m`，参照固件使用 `hiveton,h5000m`。当前 U-Boot 对该格式的接受情况尚未实机验证，刷入前需确认格式、目标区域和文件大小上限。
+
+
+## 本次定制
+
+- 左上角品牌：Hiveton H5000M。
+- MT5700：luci-app-mt5700 v1.14.21（A1）。
+- 移远 RM500Q/RM520N：luci-app-qmodem-generic v2.5.0-r2 + QModem 3.3.0（B1）。
+- 广和通 FM350：luci-app-fm350 v1.0.16（C1，上游开发验证阶段）。
+- iStore 使用支持 APK 的 0.2.1；包含 Docker 引擎及 LuCI 管理界面。
+- 状态概览使用 iStoreOS QuickStart；移除 nlbwmon 带宽监控。
+- Wi-Fi：2.4GHz A5kM / EHT20，5GHz A5kM+ / EHT160；AU、WPA2-PSK、密码 password。
+
+默认启用 MT5700 管理。更换 FM350 时，在 FM350 服务设置中启用其服务；使用移远时，关闭 MT5700 和 FM350 的服务开关。固件会据此停止其他模组后台，避免串口争用。三个页面会同时保留。
+
+Docker 默认使用上游数据目录，部署容器前应确认空闲空间。旧配置恢复可能覆盖本次默认设置，验证新默认值应使用全新配置启动。

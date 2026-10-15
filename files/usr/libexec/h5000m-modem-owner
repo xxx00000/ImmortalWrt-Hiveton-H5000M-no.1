@@ -1,0 +1,9 @@
+#!/bin/sh
+# Existing plugin enable switches select a single owner; FM350 takes priority.
+if [ "$(uci -q get fm350.main.enabled)" = 1 ]; then
+	echo fm350
+elif [ "$(uci -q get at-webserver.config.enabled)" != 0 ]; then
+	echo mt5700
+else
+	echo quectel
+fi
