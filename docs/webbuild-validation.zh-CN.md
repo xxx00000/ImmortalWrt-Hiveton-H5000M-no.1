@@ -4,12 +4,14 @@
 
 ## 本地验证
 
-- Node.js 24.19.0：51 项测试通过。额外的 Linux/OpenSSL 全流程集成测试在本机 macOS LibreSSL 上跳过，CI 中强制执行，不允许跳过。
-- Python：20 项测试通过，包含原有 10 项测试及开发期间 main 新增的 3 项来源保护测试。
+- 本机 Node.js 24.19.0：51 项测试通过，1 项依赖 OpenSSL 的集成测试因 macOS LibreSSL 不支持 SHA-512 crypt 跳过。GitHub Linux CI 已实际通过全部 52 项，零跳过，包含提交→领取→上传→完成→受控下载全流程接口测试。
+- Python：21 项测试通过，包含原有 10 项测试及开发期间 main 新增的 3 项来源保护测试。
 - Workflow YAML、所有 workflow shell 步骤及首次启动脚本语法通过。
 - 原始插件选择、baseline 两份清单、prepare-custom 及模组管理的 8 个关键文件逐字节相同。
 - 浏览器实测 1440×1000 与 390×844，两种尺寸无横向溢出。实际操作校验预览、模板保存与载入，确认预览无密码，模板载入清空密码。
 - 负面测试包括命令注入包名、SSIDs 引号/命令替换、越权下载、上传超限、错误 OIDC 签名/仓库/ref/workflow/SHA/run attempt、CSRF、DHCP 池越界、任务状态竞争及代理限流隔离。
+
+私人结果打包另增加回归测试，确认 SHA256SUMS 随固件提供，且排除配置文件、符号链接和嵌套目录。
 
 ## 独立审查
 
@@ -30,4 +32,4 @@
 
 ## 实际验证边界
 
-本机没有 Docker，容器构建交给分支 CI 执行。没有创建或配置用户的 GitHub App、域名或服务器，因此真实 OAuth、OIDC 到公网服务、完整 ImmortalWrt 编译和 H5000M 硬件首次启动仍需按部署文档联调。接口测试中的模拟 GitHub 数据不代表真实固件已编译。
+本机没有 Docker；GitHub 分支 CI 已实际成功构建部署镜像，Node/Python 测试与 YAML/shell 检查均通过。没有创建或配置用户的 GitHub App、域名或服务器，因此真实 OAuth、OIDC 到公网服务、完整 ImmortalWrt 编译和 H5000M 硬件首次启动仍需按部署文档联调。接口测试中的模拟 GitHub 数据不代表真实固件已编译。

@@ -42,7 +42,7 @@ def main(mode):
             if success:
                 # Only flat reviewed output files; never include wrt/files or runner secrets.
                 for p in sorted((root/'output').iterdir()):
-                    if p.is_file() and not p.is_symlink() and (p.suffix in ('.bin','.json','.txt','.tsv','.manifest') or p.name=='feeds.conf.default'):tar.add(p,arcname=p.name,recursive=False)
+                    if p.is_file() and not p.is_symlink() and (p.suffix in ('.bin','.json','.txt','.tsv','.manifest') or p.name in ('feeds.conf.default','SHA256SUMS')):tar.add(p,arcname=p.name,recursive=False)
             else:
                 for p in (pathlib.Path(os.environ['RUNNER_TEMP'])/'webbuild-private.log',root/'build.log'):
                     if p.is_file() and not p.is_symlink():tar.add(p,arcname=p.name,recursive=False)
