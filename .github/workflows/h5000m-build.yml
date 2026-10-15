@@ -113,6 +113,9 @@ jobs:
           bash -n "$GITHUB_WORKSPACE/files/usr/libexec/h5000m-firstboot"
           python3 -m py_compile "$GITHUB_WORKSPACE/scripts/validate-image.py"
 
+      - name: Apply display name and firmware signature
+        run: python3 scripts/apply-branding.py wrt
+
       - name: Configure H5000M image
         run: |
           cd wrt
