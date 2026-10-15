@@ -9,7 +9,6 @@
 | 设备 | Hiveton H5000M |
 | 目标平台 | mediatek / filogic / hiveton_h5000m |
 | 系统版本 | ImmortalWrt 25.12.2 |
-| 固件署名 | `by xxxbug`，追加在原固件版本说明末尾，完整保留原版本号和修订号 |
 | 左侧及移动端品牌文字 | `Hiveton H5000M` |
 | 主题 | 沿用原版 Argon，仅替换品牌文字 |
 | 字体与排版 | 保留原字体文件、CSS、模板结构和菜单布局 |
