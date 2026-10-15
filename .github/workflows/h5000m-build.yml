@@ -111,6 +111,8 @@ jobs:
           test "$(git -C feeds/istore rev-parse HEAD)" = "$ISTORE_COMMIT"
           ./scripts/feeds install -a
           ./scripts/feeds install -f -p istore luci-app-store luci-lib-taskd luci-lib-xterm taskd
+          # Remove same-name feed entries before adding the pinned custom sources.
+          ./scripts/feeds uninstall luci-app-diskman luci-theme-argon luci-app-argon-config luci-app-openclash
 
       - name: Add pinned H5000M and original plugins
         run: |
@@ -189,6 +191,9 @@ jobs:
             python3 "$GITHUB_WORKSPACE/scripts/webbuild-config.py" verify "$GITHUB_WORKSPACE/wrt" "$RUNNER_TEMP/webbuild/config.json"
           fi
           cp .config "$GITHUB_WORKSPACE/config-resolved.txt"
+          cp tmp/.config-package.in "$GITHUB_WORKSPACE/package-kconfig.txt"
+          cp tmp/.packageinfo "$GITHUB_WORKSPACE/package-metadata.txt"
+          python3 "$GITHUB_WORKSPACE/scripts/validate-sources.py" tmp/.packageinfo "$GITHUB_WORKSPACE/source-provenance.json"
           for package in luci-app-store luci-lib-taskd luci-lib-xterm taskd luci-app-quickstart quickstart; do
             echo "Resolved dependency metadata: $package"
             grep -A30 -B2 "config PACKAGE_${package}$" tmp/.config-package.in || true
@@ -244,6 +249,7 @@ jobs:
           "$GITHUB_WORKSPACE/.audit-venv/bin/python" scripts/validate-rootfs.py "$GITHUB_WORKSPACE/wrt" "$GITHUB_WORKSPACE/output"
           find wrt/bin/targets/mediatek/filogic -name '*.manifest' -exec cat {} + > output/BUILT-PACKAGES.manifest
           cp wrt/SOURCE-COMMIT.txt output/
+          cp source-provenance.json output/
           cp baseline/all-packages.tsv output/ORIGINAL-PACKAGES.tsv
           cp config-resolved.txt output/
           cp baseline/plugins.tsv output/
@@ -288,7 +294,9 @@ jobs:
             config-resolved.txt
             package-kconfig.txt
             package-metadata.txt
+            source-provenance.json
             build.log
+            output/
           if-no-files-found: ignore
           retention-days: 7
 
