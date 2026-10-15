@@ -1,0 +1,7 @@
+#!/bin/sh
+# preinit_mount_root runs before the backup archive is extracted.
+h5000m_preserve_restored_config() {
+	[ ! -f /sysupgrade.tgz ] && [ ! -f /tmp/sysupgrade.tar ] && return 0
+	: > /tmp/h5000m-preserve-config
+}
+boot_hook_add preinit_mount_root h5000m_preserve_restored_config

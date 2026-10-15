@@ -1,3 +1,11 @@
+## 中文网页定制编译（WebBuild 分支）
+
+本分支新增可运行的中文网页、GitHub App 安全后端、模板管理及私人固件下载；原有插件/驱动保留，不修改 main。请先阅读 [部署与使用说明](docs/webbuild-deploy.zh-CN.md)。
+
+本地预览：`PREVIEW=1 node webbuild/server/main.mjs`，打开 http://127.0.0.1:8787 。生产部署用 `webbuild/compose.yaml`，需自有服务器、HTTPS 域名及 GitHub App。预览不触发编译；含私人密码的定制结果不上传公开 artifacts。
+
+---
+
 # Hiveton H5000M 固件
 
 适用于 Hiveton H5000M（MT7987 / MT7992），通过 GitHub Actions 编译。
@@ -55,3 +63,4 @@
 默认启用 MT5700 管理。更换 FM350 时，在 FM350 服务设置中启用其服务；使用移远时，关闭 MT5700 和 FM350 的服务开关。固件会据此停止其他模组后台，避免串口争用。三个页面会同时保留。
 
 Docker 默认使用上游数据目录，部署容器前应确认空闲空间。旧配置恢复可能覆盖本次默认设置，验证新默认值应使用全新配置启动。
+

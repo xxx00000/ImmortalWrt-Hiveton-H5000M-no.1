@@ -1,15 +1,24 @@
 #!/bin/sh
 
+# Restored configurations retain their network, radio and password settings.
+if [ -e /tmp/h5000m-preserve-config ]; then
+	: > /etc/h5000m-firstboot.done
+	grep -Fqx '/etc/h5000m-firstboot.done' /etc/sysupgrade.conf 2>/dev/null || echo '/etc/h5000m-firstboot.done' >> /etc/sysupgrade.conf
+	exit 0
+fi
+[ ! -e /etc/h5000m-webbuild.applied ] || exit 0
+[ ! -f /etc/h5000m-webbuild.conf ] || . /etc/h5000m-webbuild.conf
+
 # Keep the device-specific LAN bridge/port mapping created by the board files.
 uci -q set network.lan.proto='static'
-uci -q set network.lan.ipaddr='10.0.0.1'
-uci -q set network.lan.netmask='255.255.255.0'
+uci -q set "network.lan.ipaddr=${wb_lan_address:-10.0.0.1}"
+uci -q set "network.lan.netmask=${wb_lan_netmask:-255.255.255.0}"
 
 uci -q set dhcp.lan='dhcp'
 uci -q set dhcp.lan.interface='lan'
 uci -q set dhcp.lan.ignore='0'
-uci -q set dhcp.lan.start='100'
-uci -q set dhcp.lan.limit='150'
+uci -q set "dhcp.lan.start=${wb_dhcp_start:-100}"
+uci -q set "dhcp.lan.limit=${wb_dhcp_limit:-150}"
 uci -q set dhcp.lan.leasetime='12h'
 
 uci -q commit network
@@ -22,4 +31,15 @@ uci -q commit dhcp
 uci -q set luci.main.indexurl='/cgi-bin/luci/admin/status/overview'
 uci -q commit luci
 
+if [ -f /etc/h5000m-webbuild.conf ]; then
+	uci -q set "system.@system[0].hostname=$wb_hostname"
+	uci -q set "system.@system[0].zonename=$wb_zonename"
+	uci -q set "system.@system[0].timezone=$wb_timezone"
+	uci -q set "luci.main.mediaurlbase=$wb_theme"
+	uci -q commit system
+	uci -q commit luci
+	: > /etc/h5000m-webbuild.applied
+	grep -qx '/etc/h5000m-webbuild.applied' /etc/sysupgrade.conf 2>/dev/null || echo '/etc/h5000m-webbuild.applied' >> /etc/sysupgrade.conf
+fi
 exit 0
+

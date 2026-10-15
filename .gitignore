@@ -1,0 +1,5 @@
+.superpowers/
+__pycache__/
+webbuild/data/
+webbuild/.env
+webbuild/secrets/

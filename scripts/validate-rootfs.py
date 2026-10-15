@@ -1,5 +1,7 @@
 """Inspect the shipped SquashFS, not only the generic build manifest."""
 import io
+import os
+import importlib.util
 import json
 import pathlib
 import re
@@ -21,6 +23,23 @@ def require_aarch64(data, name):
         raise ValueError(f'{name}: expected aarch64 ELF64 little-endian backend')
 
 
+def verify_webbuild_files(files, expected, policy):
+    script = pathlib.Path(__file__).with_name('webbuild-config.py')
+    spec = importlib.util.spec_from_file_location('webbuild_config', script)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    module.validate(expected, policy)
+    if files.get('etc/h5000m-webbuild.conf', b'').decode() != module.shell_config(expected, policy):
+        raise ValueError('Custom boot configuration mismatch')
+    actual_hash = files['etc/shadow'].decode().splitlines()[0].split(':')[1]
+    if actual_hash != expected['rootHash']:
+        raise ValueError('Custom root hash mismatch')
+    packages = installed_packages(files['lib/apk/db/installed'])
+    if (set(policy['protectedPackages']) | module.selected(expected)) - packages.keys():
+        raise ValueError('Protected/custom package missing from image')
+    return True
+
+
 def main(root, output):
     from dissect.squashfs import SquashFS
     from passlib.hash import sha512_crypt
@@ -36,7 +55,7 @@ def main(root, output):
             if entry.is_dir():
                 walk(entry, name + '/')
             elif entry.is_file() and (name.startswith(('etc/uci-defaults/', 'usr/libexec/h5000m', 'usr/share/luci/menu.d/')) or name in (
-                'lib/apk/db/installed', 'usr/bin/at-webserver-rust', 'usr/sbin/fm350d', 'etc/shadow',
+                'etc/h5000m-webbuild.conf', 'lib/apk/db/installed', 'usr/bin/at-webserver-rust', 'usr/sbin/fm350d', 'etc/shadow',
                 'usr/share/ucode/luci/template/themes/argon/header.ut')):
                 files[name] = entry.open().read()
     walk(fs.root)
@@ -58,12 +77,18 @@ def main(root, output):
     if not any('mt7992_wm' in p for p in paths):
         raise ValueError('Actual MT7992 firmware missing')
     helper = files['usr/libexec/h5000m-firstboot'].decode()
-    for value in ("ssid='A5kM'", "ssid='A5kM+'", "htmode='EHT20'", "htmode='EHT160'", 'country=AU', 'key=password', 'encryption=psk2'):
+    for value in ('A5kM', 'A5kM+', "htmode='EHT20'", "htmode='EHT160'", 'country=AU', 'wb_2g_password', 'wb_5g_password', 'encryption=psk2'):
         if value not in helper:
-            raise ValueError(f'Firstboot setting absent: {value}')
-    password_ok = sha512_crypt.verify('password', files['etc/shadow'].decode().splitlines()[0].split(':')[1])
+            raise ValueError('Firstboot implementation absent')
+    private = bool(os.environ.get('TASK_ID'))
+    if private:
+        expected = json.loads((pathlib.Path(os.environ['RUNNER_TEMP'])/'webbuild/config.json').read_text())
+        policy = json.loads((pathlib.Path(__file__).resolve().parents[1]/'webbuild/policy.json').read_text())
+        password_ok = verify_webbuild_files(files, expected, policy)
+    else:
+        password_ok = sha512_crypt.verify('password', files['etc/shadow'].decode().splitlines()[0].split(':')[1])
     if not password_ok:
-        raise ValueError('Root password does not match requested default')
+        raise ValueError('Root password does not match expected value')
     header = files.get('usr/share/ucode/luci/template/themes/argon/header.ut', b'')
     if b'Hiveton H5000M' not in header:
         raise ValueError('Requested sidebar brand absent')
@@ -74,7 +99,8 @@ def main(root, output):
     (output/'STATIC-ACCEPTANCE.json').write_text(json.dumps({
         'status':'passed', 'actual_package_count':len(packages), 'rust_backends':'aarch64',
         'root_password_verified':password_ok, 'brand':'Hiveton H5000M',
-        'wifi':['AU EHT20 A5kM', 'AU EHT160 A5kM+'],
+        'wifi':['AU EHT20', 'AU EHT160'],
+        'custom_configuration_verified':private,
         'modem_managers':'A1/B1/C1; exclusive ownership; MT5700 default',
         'runtime_hardware_test':'required', 'uboot_acceptance':'not tested by CI'}, indent=2), encoding='utf-8')
     print(f'Actual SquashFS acceptance passed: {len(packages)} packages, A1/B1/C1, iStore, Docker, BE defaults')
@@ -82,3 +108,4 @@ def main(root, output):
 
 if __name__ == '__main__':
     main(pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]))
+

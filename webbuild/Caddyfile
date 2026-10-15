@@ -1,0 +1,7 @@
+{$PUBLIC_HOST} {
+    encode zstd gzip
+    reverse_proxy webbuild:8787 {
+        # Replace any caller-supplied value. Backend port must remain private.
+        header_up X-WebBuild-Client-IP {remote_host}
+    }
+}

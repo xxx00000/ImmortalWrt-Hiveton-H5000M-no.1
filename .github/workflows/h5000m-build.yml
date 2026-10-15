@@ -1,10 +1,18 @@
 name: Hiveton H5000M full firmware
 
+run-name: ${{ inputs.task_id && format('WebBuild {0}', inputs.task_id) || 'H5000M baseline build' }}
+
 on:
   push:
     branches: [main]
     paths-ignore: ['README.md', 'docs/**']
   workflow_dispatch:
+    inputs:
+      task_id:
+        description: 'WebBuild task UUID only; never enter passwords here'
+        type: string
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -12,6 +20,9 @@ permissions:
 jobs:
   build:
     name: H5000M / BE / A1-B1-C1
+    permissions:
+      contents: read
+      id-token: write
     runs-on: ubuntu-24.04
     timeout-minutes: 360
     env:
@@ -33,6 +44,8 @@ jobs:
       ARGON_COMMIT: 4b8b7849551c558ec905c40b0ebb864641c9fa32
       OPENCLASH_COMMIT: 373d0023c7006fee3bb66c90f40355ef02e2d682
       ROOT_PASSWORD: password
+      TASK_ID: ${{ inputs.task_id }}
+      WEBBUILD_URL: ${{ vars.WEBBUILD_URL }}
 
     steps:
       - name: Check out build configuration
@@ -40,6 +53,14 @@ jobs:
 
       - name: Test image safety checks
         run: python3 -m unittest discover -s tests -v
+
+      - name: Check private task input
+        if: inputs.task_id != ''
+        run: |
+          python3 - <<'PYCODE'
+          import os,re
+          assert re.fullmatch(r'[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}', os.environ['TASK_ID']), 'Invalid task UUID'
+          PYCODE
 
       - name: Prepare Ubuntu build host
         env:
@@ -64,6 +85,12 @@ jobs:
           chmod 755 scripts/rust-openwrt-linker
           echo "H5000M_OPENWRT_DIR=$GITHUB_WORKSPACE/wrt" >> "$GITHUB_ENV"
           echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=$GITHUB_WORKSPACE/scripts/rust-openwrt-linker" >> "$GITHUB_ENV"
+
+      - name: Receive private WebBuild configuration
+        if: inputs.task_id != ''
+        run: |
+          umask 077
+          python3 scripts/webbuild-transfer.py claim
 
       - name: Fetch pinned ImmortalWrt source
         run: |
@@ -135,12 +162,14 @@ jobs:
           chmod 755 files/etc/init.d/h5000m-defaults
           chmod 755 files/usr/libexec/h5000m-firstboot
 
-          mkdir -p files/etc
-          cp package/base-files/files/etc/shadow files/etc/shadow
-          root_hash="$(openssl passwd -6 "$ROOT_PASSWORD")"
-          sed -i "s|^root:[^:]*:|root:${root_hash}:|" files/etc/shadow
-          chmod 600 files/etc/shadow
-          grep -q '^root:\$6\$' files/etc/shadow
+          if [ -z "$TASK_ID" ]; then
+            mkdir -p files/etc
+            cp package/base-files/files/etc/shadow files/etc/shadow
+            root_hash="$(openssl passwd -6 "$ROOT_PASSWORD")"
+            sed -i "s|^root:[^:]*:|root:${root_hash}:|" files/etc/shadow
+            chmod 600 files/etc/shadow
+            grep -q '^root:\$6\$' files/etc/shadow
+          fi
 
           bash -n "$GITHUB_WORKSPACE/files/etc/uci-defaults/99-h5000m-defaults"
           bash -n "$GITHUB_WORKSPACE/files/etc/init.d/h5000m-defaults"
@@ -149,9 +178,16 @@ jobs:
 
       - name: Configure H5000M image
         run: |
+          if [ -n "$TASK_ID" ]; then umask 077; exec >> "$RUNNER_TEMP/webbuild-private.log" 2>&1; fi
           cd wrt
           cat "$GITHUB_WORKSPACE/config/h5000m.config" >> .config
+          if [ -n "$TASK_ID" ]; then
+            python3 "$GITHUB_WORKSPACE/scripts/webbuild-config.py" apply "$GITHUB_WORKSPACE/wrt" "$RUNNER_TEMP/webbuild/config.json"
+          fi
           make defconfig
+          if [ -n "$TASK_ID" ]; then
+            python3 "$GITHUB_WORKSPACE/scripts/webbuild-config.py" verify "$GITHUB_WORKSPACE/wrt" "$RUNNER_TEMP/webbuild/config.json"
+          fi
           cp .config "$GITHUB_WORKSPACE/config-resolved.txt"
           for package in luci-app-store luci-lib-taskd luci-lib-xterm taskd luci-app-quickstart quickstart; do
             echo "Resolved dependency metadata: $package"
@@ -190,17 +226,20 @@ jobs:
 
       - name: Download source packages
         run: |
+          if [ -n "$TASK_ID" ]; then umask 077; exec >> "$RUNNER_TEMP/webbuild-private.log" 2>&1; fi
           cd wrt
           make download -j"$(nproc)"
 
       - name: Compile full firmware
         run: |
+          if [ -n "$TASK_ID" ]; then umask 077; exec >> "$RUNNER_TEMP/webbuild-private.log" 2>&1; fi
           cd wrt
           set -o pipefail
           make -j"$(nproc)" 2>&1 | tee "$GITHUB_WORKSPACE/build.log" || make -j1 V=s 2>&1 | tee -a "$GITHUB_WORKSPACE/build.log"
 
       - name: Verify and package full H5000M image
         run: |
+          if [ -n "$TASK_ID" ]; then umask 077; exec >> "$RUNNER_TEMP/webbuild-private.log" 2>&1; fi
           python3 "$GITHUB_WORKSPACE/scripts/validate-image.py" "$GITHUB_WORKSPACE/wrt" "$GITHUB_WORKSPACE/output"
           "$GITHUB_WORKSPACE/.audit-venv/bin/python" scripts/validate-rootfs.py "$GITHUB_WORKSPACE/wrt" "$GITHUB_WORKSPACE/output"
           find wrt/bin/targets/mediatek/filogic -name '*.manifest' -exec cat {} + > output/BUILT-PACKAGES.manifest
@@ -232,6 +271,7 @@ jobs:
           } > output/PLUGIN-COMMITS.txt
 
       - name: Upload complete firmware artifact
+        if: inputs.task_id == ''
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: H5000M-25.12.2-BE-A1B1C1-${{ github.run_id }}
@@ -240,7 +280,7 @@ jobs:
           retention-days: 14
 
       - name: Upload failure diagnostics
-        if: failure()
+        if: failure() && inputs.task_id == ''
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: H5000M-diagnostics-${{ github.run_id }}
@@ -251,3 +291,13 @@ jobs:
             build.log
           if-no-files-found: ignore
           retention-days: 7
+
+
+      - name: Deliver private result and erase runner configuration
+        if: always() && inputs.task_id != ''
+        env:
+          BUILD_STATUS: ${{ job.status }}
+        run: |
+          umask 077
+          trap 'rm -rf "$RUNNER_TEMP/webbuild"; rm -f "$RUNNER_TEMP/webbuild-private.log"' EXIT
+          python3 scripts/webbuild-transfer.py finish

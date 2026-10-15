@@ -1,9 +1,22 @@
 #!/bin/sh
 
-DONE=/etc/h5000m-firstboot.done
+set -e
+DONE="${H5000M_DONE:-/etc/h5000m-firstboot.done}"
+CONFIG="${H5000M_CONFIG:-/etc/h5000m-webbuild.conf}"
+RESTORE_GUARD="${H5000M_RESTORE_GUARD:-/tmp/h5000m-preserve-config}"
+BACKUP_LIST="${H5000M_BACKUP_LIST:-/etc/sysupgrade.conf}"
+remember_done() {
+	: > "$DONE"
+	grep -Fqx "$DONE" "$BACKUP_LIST" 2>/dev/null || printf '%s\n' "$DONE" >> "$BACKUP_LIST"
+}
+if [ -e "$RESTORE_GUARD" ]; then
+	remember_done
+	exit 0
+fi
+[ ! -f "$CONFIG" ] || . "$CONFIG"
 [ -e "$DONE" ] && exit 0
 
-logger -t h5000m-firstboot 'Applying AU Wi-Fi defaults'
+logger -t h5000m-firstboot 'Applying H5000M Wi-Fi defaults'
 attempt=0
 while [ "$attempt" -lt 60 ]; do
 	if ! uci -q show wireless | grep -q '=wifi-device$'; then
@@ -14,21 +27,31 @@ while [ "$attempt" -lt 60 ]; do
 	found_5g=0
 	for device in $(uci -q show wireless | sed -n 's/^wireless\.\([^=]*\)=wifi-device$/\1/p'); do
 		band="$(uci -q get "wireless.$device.band" 2>/dev/null || true)"
+		if [ -z "$band" ]; then
+			case "$(uci -q get "wireless.$device.hwmode" 2>/dev/null || true)" in
+				11g|11ng|11b) band=2g ;;
+				11a|11na|11ac) band=5g ;;
+			esac
+		fi
 		case "$band" in
 			2g)
-				ssid='A5kM'
+				ssid="${wb_2g_ssid:-A5kM}"
+				password="${wb_2g_password:-password}"
+				disabled="${wb_2g_disabled:-0}"
 				htmode='EHT20'
 				found_2g=1
 				;;
 			5g)
-				ssid='A5kM+'
+				ssid="${wb_5g_ssid:-A5kM+}"
+				password="${wb_5g_password:-password}"
+				disabled="${wb_5g_disabled:-0}"
 				htmode='EHT160'
 				found_5g=1
 				;;
 			*) continue ;;
 		esac
 
-		uci -q set "wireless.$device.disabled=0"
+		uci -q set "wireless.$device.disabled=$disabled"
 		uci -q set "wireless.$device.country=AU"
 		uci -q set "wireless.$device.channel=auto"
 		uci -q set "wireless.$device.htmode=$htmode"
@@ -47,14 +70,14 @@ while [ "$attempt" -lt 60 ]; do
 		uci -q set "wireless.$ap.network=lan"
 		uci -q set "wireless.$ap.ssid=$ssid"
 		uci -q set "wireless.$ap.encryption=psk2"
-		uci -q set "wireless.$ap.key=password"
-		uci -q set "wireless.$ap.disabled=0"
+		uci -q set "wireless.$ap.key=$password"
+		uci -q set "wireless.$ap.disabled=$disabled"
 	done
 
 	if [ "$found_2g" -eq 1 ] && [ "$found_5g" -eq 1 ]; then
 		uci -q commit wireless
 		if wifi reload >/dev/null 2>&1; then
-			: > "$DONE"
+			remember_done
 			logger -t h5000m-firstboot 'Both AU radios configured; 5GHz requests EHT160'
 			exit 0
 		fi
@@ -67,3 +90,4 @@ done
 
 logger -t h5000m-firstboot 'Timed out waiting for 2.4GHz and 5GHz radios'
 exit 1
+

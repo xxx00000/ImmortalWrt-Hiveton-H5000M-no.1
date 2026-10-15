@@ -1,0 +1,33 @@
+name: WebBuild quality checks
+on:
+  push:
+    branches: [Hiveton-H5000M-WebBuild]
+  pull_request:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  tests:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Node 24 tests with production OpenSSL
+        run: docker run --rm -e REQUIRE_OPENSSL=1 -v "$PWD:/app" -w /app node:24-bookworm node --test webbuild/test/*.test.mjs
+      - name: Firmware regression tests
+        run: python3 -m unittest discover -s tests -v
+      - name: Validate workflow shell and YAML
+        run: |
+          python3 -m venv /tmp/webbuild-yaml
+          /tmp/webbuild-yaml/bin/pip install PyYAML==6.0.2
+          /tmp/webbuild-yaml/bin/python - <<'PY'
+          import pathlib, subprocess, yaml
+          for path in pathlib.Path('.github/workflows').glob('*.yml'):
+              data = yaml.safe_load(path.read_text())
+              for job in data['jobs'].values():
+                  for step in job['steps']:
+                      if 'run' in step:
+                          subprocess.run(['bash', '-n'], input=step['run'], text=True, check=True)
+          PY
+          find files/etc/init.d files/etc/uci-defaults files/usr/libexec files/lib/preinit -type f -exec sh -n {} \;
+      - name: Build deployment image
+        run: docker build -t h5000m-webbuild-test webbuild
