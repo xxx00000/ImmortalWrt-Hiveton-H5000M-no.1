@@ -1,0 +1,56 @@
+--- a/at-webserver/Makefile
++++ b/at-webserver/Makefile
+@@ -38,7 +38,6 @@
+ 	
+ 	$(INSTALL_DIR) $(1)/www/cgi-bin
+ 	$(INSTALL_BIN) ./files/www/cgi-bin/at-ws-info $(1)/www/cgi-bin/
+-	$(INSTALL_BIN) ./files/www/cgi-bin/at-log-clear $(1)/www/cgi-bin/
+ endef
+ 
+ define Package/at-webserver/conffiles
+--- a/luci-app-at-webserver/htdocs/luci-static/resources/view/at-webserver/logs.js
++++ b/luci-app-at-webserver/htdocs/luci-static/resources/view/at-webserver/logs.js
+@@ -29,21 +29,17 @@
+ 	},
+ 
+ 	handleClearLog: function(ev) {
+-		// 通过 HTTP 请求调用 CGI 脚本清空日志
+-		return L.Request.get('/cgi-bin/at-log-clear').then(function(res) {
+-			try {
+-				var result = res.json();
+-				if (result.success) {
+-					ui.addNotification(null, E('p', _('✓ 通知日志已清空')), 'success');
+-					setTimeout(function() { window.location.reload(); }, 600);
+-				} else {
+-					ui.addNotification(null, E('p', _('清空失败: %s').format(result.error || '未知错误')), 'error');
+-				}
+-			} catch(e) {
+-				ui.addNotification(null, E('p', _('清空失败: 解析响应出错')), 'error');
+-			}
++		var logFile = uci.get('at-webserver', 'config', 'log_file');
++		if (!logFile) {
++			ui.addNotification(null, E('p', _('未配置日志文件')), 'error');
++			return Promise.resolve();
++		}
++		// fs.write uses the authenticated LuCI session and rpcd file ACL.
++		return fs.write(logFile, '').then(function() {
++			ui.addNotification(null, E('p', _('✓ 通知日志已清空')), 'success');
++			setTimeout(function() { window.location.reload(); }, 600);
+ 		}).catch(function(err) {
+-			ui.addNotification(null, E('p', _('清空失败: %s').format(err.message || '请求失败')), 'error');
++			ui.addNotification(null, E('p', _('清空失败: %s').format(err.message || '权限不足')), 'error');
+ 		});
+ 	},
+ 
+--- a/luci-app-at-webserver/root/usr/share/rpcd/acl.d/luci-app-at-webserver.json
++++ b/luci-app-at-webserver/root/usr/share/rpcd/acl.d/luci-app-at-webserver.json
+@@ -18,8 +18,7 @@
+ 				"/var/log/at-notifications.log": [ "read", "stat" ],
+ 				"/tmp/*": [ "list" ],
+ 				"/var/log/*": [ "list" ],
+-				"/www/cgi-bin/at-ws-info": [ "exec" ],
+-				"/www/cgi-bin/at-log-clear": [ "exec" ]
++				"/www/cgi-bin/at-ws-info": [ "exec" ]
+ 			}
+ 		},
+ 		"write": {

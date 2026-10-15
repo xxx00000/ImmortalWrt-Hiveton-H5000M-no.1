@@ -1,0 +1,14 @@
+#!/bin/sh
+# Persist a device-local key before the auto-started WebSocket server listens.
+# Never write the key to stdout, logs, build output, or the source repository.
+set -eu
+
+key="$(uci -q get at-webserver.config.websocket_auth_key || true)"
+[ -z "$key" ] || exit 0
+
+key="$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')"
+[ "${#key}" -eq 64 ] || exit 1
+case "$key" in *[!0-9a-f]*) exit 1 ;; esac
+uci -q set "at-webserver.config.websocket_auth_key=$key"
+uci -q commit at-webserver
+[ "$(uci -q get at-webserver.config.websocket_auth_key)" = "$key" ]
