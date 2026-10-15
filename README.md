@@ -46,13 +46,6 @@
 
 沿用原基础版本的插件选择；本次不加入后续实验版本的 iStore、Docker 或 QuickStart 概览。OpenClash 核心需另行配置。最终安装包以本次构建产物清单为准。
 
-## 蜂窝模组
-
-| 模组 | 管理与驱动准备 | 验证范围 |
-| --- | --- | --- |
-| MT5700 / MT5700M | FAN789 MT5700M Web 与 transport | 需实机确认通信及拨号 |
-| 移远 RM500Q、RM520N | QModem、USB QMI/MBIM/NCM/RNDIS、MHI 相关支持 | 取决于型号后缀、固件协议和 USB/PCIe 接线 |
-| 广和通 FM350 | QModem、MBIM、MHI/t7xx 相关支持 | 需按实际接口确认识别与拨号 |
 
 ## 编译、下载与刷写
 
