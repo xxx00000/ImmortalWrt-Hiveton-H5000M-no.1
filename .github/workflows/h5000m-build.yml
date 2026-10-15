@@ -152,6 +152,14 @@ jobs:
           cd wrt
           cat "$GITHUB_WORKSPACE/config/h5000m.config" >> .config
           make defconfig
+          cp .config "$GITHUB_WORKSPACE/config-resolved.txt"
+          for package in luci-app-store luci-lib-taskd luci-lib-xterm taskd luci-app-quickstart quickstart; do
+            echo "Resolved dependency metadata: $package"
+            grep -A30 -B2 "config PACKAGE_${package}$" tmp/.config-package.in || true
+            grep "CONFIG_PACKAGE_${package}[= ]" .config || true
+          done
+          cp tmp/.config-package.in "$GITHUB_WORKSPACE/package-kconfig.txt"
+          cp tmp/.packageinfo "$GITHUB_WORKSPACE/package-metadata.txt"
 
           for symbol in \
             TARGET_DEVICE_mediatek_filogic_DEVICE_hiveton_h5000m \
@@ -238,6 +246,8 @@ jobs:
           name: H5000M-diagnostics-${{ github.run_id }}
           path: |
             config-resolved.txt
+            package-kconfig.txt
+            package-metadata.txt
             build.log
           if-no-files-found: ignore
           retention-days: 7
