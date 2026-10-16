@@ -1,0 +1,36 @@
+--- a/at-webserver/files/usr/bin/at-server.py
++++ b/at-webserver/files/usr/bin/at-server.py
+@@ -165,7 +165,7 @@
+         if auth_key:
+             logger.info(f"配置加载: 连接密钥已设置 (长度: {len(auth_key)})")
+         else:
+-            logger.info(f"配置加载: 连接密钥未设置 (允许无密钥访问)")
++            logger.info(f"配置加载: 连接密钥未设置 (拒绝连接，等待设备生成密钥)")
+         
+         # 读取通知配置
+         wechat_webhook = uci_data.get('wechat_webhook', '')
+@@ -1778,6 +1778,7 @@
+                 try:
+                     result = await self.connection.connect()
+                     if result:
++                        await self.connection.configure_notifications()
+                         # 连接成功，重置重试计数器
+                         if retries > 0:
+                             logger.info("连接已恢复")
+@@ -1830,16 +1831,6 @@
+         except:
+             return False
+     
+-    async def _init_at_config(self):
+-        """初始化AT命令配置"""
+-        cnmi_config = await self.send_command("AT+CNMI?\r\n")
+-        cmgf_config = await self.send_command("AT+CMGF?\r\n")
+-        if "+CNMI: 2,1,0,2,0" not in cnmi_config.decode('ascii', errors='ignore'):
+-            await self.send_command("AT+CNMI=2,1,0,2,0\r\n")
+-        if "+CMGF: 0" not in cmgf_config.decode('ascii', errors='ignore'):
+-            await self.send_command("AT+CMGF=0\r\n")
+-        await self.send_command("AT+CLIP=1\r\n")
+-
+     async def set_pdcp_data_info(self, enable: bool, interval: int = None) -> bool:
+         """设置PDCP数据信息上报"""
+         try:

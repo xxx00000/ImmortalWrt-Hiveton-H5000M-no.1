@@ -1,0 +1,35 @@
+#!/bin/sh
+# Retained sysupgrade settings must not restore the removed FAN789 services.
+for service in mt5700m-manager mt5700m-traffic; do
+    if [ -x "/etc/init.d/$service" ]; then
+        "/etc/init.d/$service" stop >/dev/null 2>&1
+        "/etc/init.d/$service" disable >/dev/null 2>&1
+    fi
+done
+rm -f /etc/rc.d/*mt5700m-manager /etc/rc.d/*mt5700m-traffic
+rm -f /etc/config/mt5700m /etc/mt5700m/traffic-history
+rm -f /etc/init.d/mt5700m-manager /etc/init.d/mt5700m-traffic
+rm -f /etc/hotplug.d/usb/60-mt5700m /etc/hotplug.d/net/95-mt5700m-traffic
+rm -f /etc/uci-defaults/90-mt5700m /etc/uci-defaults/92-mt5700m-traffic
+rm -f /usr/libexec/rpcd/mt5700m /usr/libexec/rpcd/mt5700m-traffic
+rm -f /usr/sbin/mt5700m-transport /usr/share/luci/menu.d/luci-app-mt5700m.json
+rm -f /usr/sbin/mt5700m-manager /usr/sbin/mt5700m-at /usr/sbin/mt5700m-traffic /usr/sbin/mt5700m-read
+rm -f /lib/upgrade/keep.d/mt5700m-traffic
+rm -rf /usr/share/mt5700m /www/luci-static/resources/mt5700m
+rm -f /usr/share/rpcd/acl.d/luci-app-mt5700m.json
+rm -rf /www/luci-static/resources/view/mt5700m
+rm -f /tmp/luci-indexcache /tmp/luci-indexcache.*
+rm -rf /tmp/luci-modulecache
+
+uci -q set at-webserver.config.enabled=1
+uci -q set at-webserver.config.connection_type=UBUS
+uci -q set at-webserver.config.schedule_enabled=0
+uci -q set qmodem.main.at_tool=0
+for section in $(uci -q show qmodem | sed -n 's/^qmodem\.\([^.=]*\)=modem-device$/\1/p'); do
+    uci -q set "qmodem.$section.use_ubus=1"
+done
+uci -q commit at-webserver
+uci -q commit qmodem
+/etc/init.d/ubus-at-daemon enable
+/etc/init.d/at-webserver enable
+exit 0

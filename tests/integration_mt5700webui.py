@@ -86,5 +86,46 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                     await client.recv()
 
 
+    async def test_websocket_rejects_missing_server_key(self):
+        self.module.WEBSOCKET_CONFIG = {"AUTH_KEY": ""}
+        service = self.module.WebSocketServer(self.module.ATClient())
+        async with websockets.serve(service.handle_client, "127.0.0.1", 0) as server:
+            port = server.sockets[0].getsockname()[1]
+            async with websockets.connect(f"ws://127.0.0.1:{port}") as client:
+                with self.assertRaises(websockets.exceptions.ConnectionClosed):
+                    await client.recv()
+
+    async def test_authenticated_websocket_uses_shared_sms_transaction(self):
+        from test_shared_at import FakeDaemon
+        from shared_at import SharedATConnection
+        daemon = FakeDaemon()
+        self.module.WEBSOCKET_CONFIG = {"AUTH_KEY": "test-only-key"}
+        at_client = self.module.ATClient()
+        at_client.connection = SharedATConnection(bus=daemon, resolver=lambda: ('usb1', '/dev/ttyUSB2'))
+        service = self.module.WebSocketServer(at_client)
+        async with websockets.serve(service.handle_client, "127.0.0.1", 0) as server:
+            port = server.sockets[0].getsockname()[1]
+            async with websockets.connect(f"ws://127.0.0.1:{port}") as client:
+                await client.send('{"auth_key":"test-only-key"}')
+                await client.recv()
+                await client.send('AT+CMGS=2\\r000102')
+                self.assertTrue(json.loads(await client.recv())["success"])
+                daemon.fail = True
+                await client.send('AT+CSQ')
+                self.assertFalse(json.loads(await client.recv())["success"])
+        self.assertEqual(daemon.commands[:3], ['AT+CMGF=0', 'AT+CMGS=2', '3030303130321a'])
+        self.assertIsNone(daemon.owner)
+
+    async def test_real_backend_connect_sets_notifications_through_shared_owner(self):
+        from test_shared_at import FakeDaemon
+        from shared_at import SharedATConnection
+        daemon = FakeDaemon()
+        client = self.module.ATClient()
+        client.connection = SharedATConnection(bus=daemon, resolver=lambda: ('usb1', '/dev/ttyUSB2'))
+        self.assertTrue(await client.connect(retry=False))
+        self.assertEqual(daemon.commands, ['AT', 'AT+CNMI=2,1,0,2,0', 'AT+CLIP=1'])
+        self.assertEqual((daemon.acquisitions, daemon.releases), (2, 2))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,0 +1,220 @@
+diff --git a/application/modem_scan/Makefile b/application/modem_scan/Makefile
+index 29c62a2..081e4a8 100644
+--- a/application/modem_scan/Makefile
++++ b/application/modem_scan/Makefile
+@@ -13,7 +13,7 @@ define Package/$(PKG_NAME)
+   SECTION:=utils
+   CATEGORY:=Utilities
+   TITLE:=QModem scan daemon and client
+-  DEPENDS:=+libjson-c +tom_modem +sms-tool_q +ubus-at-daemon
++  DEPENDS:=+libjson-c +tom_modem +ubus-at-daemon
+ endef
+ 
+ define Package/$(PKG_NAME)/description
+diff --git a/application/modem_scan/src/modem_scand.c b/application/modem_scan/src/modem_scand.c
+index 30f11f2..50ca0cf 100644
+--- a/application/modem_scan/src/modem_scand.c
++++ b/application/modem_scan/src/modem_scand.c
+@@ -783,7 +783,7 @@ static int at_command(const char *port, const char *cmd, int fast, int timeout,
+ 		r = waitpid(pid, &status, WNOHANG);
+ 		if (r == pid)
+ 			break;
+-		if (timeout > 0 && time(NULL) - start >= timeout) {
++		if (timeout > 0 && time(NULL) - start >= timeout + 300) {
+ 			kill(-pid, SIGTERM);
+ 			usleep(200000);
+ 			if (waitpid(pid, &status, WNOHANG) == 0)
+@@ -810,12 +810,7 @@ static void *probe_port_thread(void *arg)
+ 	ctx->ok = 0;
+ 	if (!path_exists(ctx->port))
+ 		return NULL;
+-	{
+-		char json[256];
+-		char *argv[] = { "ubus", "call", "at-daemon", "close", json, NULL };
+-		snprintf(json, sizeof(json), "{ \"at_port\": \"%s\" }", ctx->port);
+-		run_exec(argv, 2);
+-	}
++	/* Shared AT owner retains the port; probing never closes another client. */
+ 	if (at_command(ctx->port, "ATI", 1, g.at_timeout_fast, res, sizeof(res)) == 0 &&
+ 	    (strstr(res, "OK") || strstr(res, "ATI")))
+ 		ctx->ok = 1;
+diff --git a/application/qmodem/Makefile b/application/qmodem/Makefile
+index 09d707d..d14186d 100644
+--- a/application/qmodem/Makefile
++++ b/application/qmodem/Makefile
+@@ -23,7 +23,7 @@ define Package/$(PKG_NAME)
+ 		+kmod-usb-net-cdc-mbim \
+ 		+kmod-usb-net-rndis \
+ 		+kmod-usb-net-cdc-ncm +kmod-usb-net-huawei-cdc-ncm \
+-  		+ubus-at-daemon +tom_modem +terminfo +sms-tool_q \
++		+ubus-at-daemon +tom_modem +terminfo \
+ 		+modem_scan \
+ 		+jq +bc\
+ 		+coreutils +coreutils-stat +xxd \
+diff --git a/application/qmodem/files/usr/libexec/rpcd/qmodem b/application/qmodem/files/usr/libexec/rpcd/qmodem
+index d9b7c0a..46c0425 100755
+--- a/application/qmodem/files/usr/libexec/rpcd/qmodem
++++ b/application/qmodem/files/usr/libexec/rpcd/qmodem
+@@ -961,14 +961,14 @@ EOF
+                 . /usr/share/qmodem/modem_util.sh
+                 get_at_port_config "$config_section" 1
+                 
+-                sms_tool_q -d "$at_port" send "$phone_number" "$message_content" > /dev/null
++                /usr/libexec/qmodem-shared-sms -d "$at_port" send "$phone_number" "$message_content" > /dev/null
+                 ret=$?
+                 
+                 json_init
+                 json_add_object result
+                 if [ "$ret" = "0" ]; then
+                     json_add_string status "1"
+-                    json_add_string cmd "sms_tool_q -d $at_port send \"$phone_number\" \"$message_content\""
++                    json_add_string cmd "/usr/libexec/qmodem-shared-sms -d $at_port send \"$phone_number\" \"$message_content\""
+                     json_add_string cmd_json "$params"
+                 else
+                     json_add_string status "0"
+diff --git a/application/qmodem/files/usr/share/qmodem/modem_ctrl.sh b/application/qmodem/files/usr/share/qmodem/modem_ctrl.sh
+index 49e682d..38311c2 100755
+--- a/application/qmodem/files/usr/share/qmodem/modem_ctrl.sh
++++ b/application/qmodem/files/usr/share/qmodem/modem_ctrl.sh
+@@ -67,7 +67,6 @@ get_sms(){
+     get_sms_capabilities
+     if [ ! -f $cache_file ] || [ $(($current_time - $file_time)) -gt $cache_timeout ]; then
+         touch $cache_file
+-        #sms_tool_q -d $at_port -j recv > $cache_file
+         tom_modem $use_ubus_flag -d $at_port -t 10 -g -o r > $cache_file
+         echo $(cat $cache_file ; json_dump) | jq -s 'add'
+     else
+@@ -278,11 +277,12 @@ case $method in
+         phone_number=$(echo $cmd_json | jq -r '.phone_number')
+         message_content=$(echo $cmd_json | jq -r '.message_content')
+         [ -n "$sms_at_port" ] && at_port=$sms_at_port
+-        sms_tool_q -d $at_port send "$phone_number" "$message_content" > /dev/null
++        /usr/libexec/qmodem-shared-sms -d "$at_port" send "$phone_number" "$message_content" > /dev/null
++        sms_result=$?
+         json_select result
+-        if [ "$?" == 0 ]; then
++        if [ "$sms_result" = 0 ]; then
+             json_add_string status "1"
+-            json_add_string cmd "sms_tool_q -d $at_port send \"$phone_number\" \"$message_content\""
++            json_add_string cmd "/usr/libexec/qmodem-shared-sms -d $at_port send \"$phone_number\" \"$message_content\""
+             json_add_string "cmd_json" "$cmd_json"
+         else
+             json_add_string status "0"
+diff --git a/application/qmodem/files/usr/share/qmodem/modem_util.sh b/application/qmodem/files/usr/share/qmodem/modem_util.sh
+index e039601..85cea97 100755
+--- a/application/qmodem/files/usr/share/qmodem/modem_util.sh
++++ b/application/qmodem/files/usr/share/qmodem/modem_util.sh
+@@ -101,14 +101,14 @@ at()
+     local response_file rc
+     response_file=$(mktemp /tmp/qmodem_at_response.XXXXXX) || {
+       if [ "$(uci get qmodem.main.at_tool 2>/dev/null)" == "1" ]; then
+-        sms_tool_q -d $at_port at "$atcmd"
++        tom_modem -u -d "$at_port" -o a -c "$atcmd"
+       else
+         tom_modem $use_ubus_flag -d $at_port -o a -c "$atcmd" $options
+       fi
+       return $?
+     }
+     if [ "$(uci get qmodem.main.at_tool 2>/dev/null)" == "1" ]; then
+-     sms_tool_q -d $at_port at "$atcmd" > "$response_file"
++     tom_modem -u -d "$at_port" -o a -c "$atcmd" > "$response_file"
+     else
+      tom_modem $use_ubus_flag -d $at_port -o a -c "$atcmd" $options > "$response_file"
+     fi
+@@ -119,7 +119,7 @@ at()
+     return $rc
+   fi
+   if [ "$(uci get qmodem.main.at_tool 2>/dev/null)" == "1" ]; then
+-   sms_tool_q -d $at_port at "$atcmd"
++   tom_modem -u -d "$at_port" -o a -c "$atcmd"
+   else
+    tom_modem $use_ubus_flag  -d $at_port -o a -c "$atcmd" $options
+   fi
+@@ -135,14 +135,14 @@ fastat()
+     local response_file rc
+     response_file=$(mktemp /tmp/qmodem_at_response.XXXXXX) || {
+       if [ "$(uci get qmodem.main.at_tool 2>/dev/null)" == "1" ]; then
+-        sms_tool_q -t 1 -d $at_port at "$atcmd"
++        tom_modem -u -t 1 -d "$at_port" -o a -c "$atcmd"
+       else
+         tom_modem -d $at_port -o a -c "$atcmd" -t 1
+       fi
+       return $?
+     }
+     if [ "$(uci get qmodem.main.at_tool 2>/dev/null)" == "1" ]; then
+-     sms_tool_q -t 1 -d $at_port at "$atcmd" > "$response_file"
++     tom_modem -u -t 1 -d "$at_port" -o a -c "$atcmd" > "$response_file"
+     else
+      tom_modem -d $at_port -o a -c "$atcmd" -t 1 > "$response_file"
+     fi
+@@ -153,7 +153,7 @@ fastat()
+     return $rc
+   fi
+   if [ "$(uci get qmodem.main.at_tool 2>/dev/null)" == "1" ]; then
+-   sms_tool_q -t 1 -d $at_port at "$atcmd"
++   tom_modem -u -t 1 -d "$at_port" -o a -c "$atcmd"
+   else
+    tom_modem -d $at_port -o a -c "$atcmd" -t 1
+   fi
+diff --git a/luci/luci-app-qmodem-next/htdocs/luci-static/resources/view/qmodem/debug.js b/luci/luci-app-qmodem-next/htdocs/luci-static/resources/view/qmodem/debug.js
+index 653db76..8b71ff2 100644
+--- a/luci/luci-app-qmodem-next/htdocs/luci-static/resources/view/qmodem/debug.js
++++ b/luci/luci-app-qmodem-next/htdocs/luci-static/resources/view/qmodem/debug.js
+@@ -143,12 +143,13 @@ return view.extend({
+ 			var ubusCheckbox = E('input', {
+ 				'type': 'checkbox',
+ 				'id': 'use_ubus_' + modem.id,
+-				'checked': modem.use_ubus === '1'
++				'checked': true,
++				'disabled': true
+ 			});
+ 			
+ 			ubusField.appendChild(ubusCheckbox);
+ 			ubusField.appendChild(document.createTextNode(' '));
+-			ubusField.appendChild(E('span', {}, _('Enable to use Ubus AT daemon instead of direct serial port access')));
++			ubusField.appendChild(E('span', {}, '本固件强制使用共享 AT 服务'));
+ 			ubusSection.appendChild(ubusField);
+ 			container.appendChild(ubusSection);
+ 
+diff --git a/luci/luci-app-qmodem-next/htdocs/luci-static/resources/view/qmodem/network_config.js b/luci/luci-app-qmodem-next/htdocs/luci-static/resources/view/qmodem/network_config.js
+index b611053..5cd3fd2 100644
+--- a/luci/luci-app-qmodem-next/htdocs/luci-static/resources/view/qmodem/network_config.js
++++ b/luci/luci-app-qmodem-next/htdocs/luci-static/resources/view/qmodem/network_config.js
+@@ -314,7 +314,9 @@ return view.extend({
+ 	o.modalonly = true;
+ 
+ 	o = s.option(form.Flag, 'use_ubus', _('Use Ubus'));
+-	o.default = '0';
++	o.default = '1';
++	o.readonly = true;
++	o.cfgvalue = function() { return '1'; };
+ 	o.rmempty = false;
+ 	o.modalonly = true;
+ 
+diff --git a/luci/luci-app-qmodem-next/htdocs/luci-static/resources/view/qmodem/settings.js b/luci/luci-app-qmodem-next/htdocs/luci-static/resources/view/qmodem/settings.js
+index b0a70ee..554431b 100644
+--- a/luci/luci-app-qmodem-next/htdocs/luci-static/resources/view/qmodem/settings.js
++++ b/luci/luci-app-qmodem-next/htdocs/luci-static/resources/view/qmodem/settings.js
+@@ -97,8 +97,10 @@ return view.extend({
+ 		s = m.section(form.NamedSection, 'main', 'main', _('Modem Probe Settings'));
+ 
+ 		o = s.option(form.Flag, 'at_tool', _('Alternative AT Tools'));
+-		o.description = _('If enabled, using alternative AT Tools');
++		o.description = '本固件统一使用共享 AT 服务';
+ 		o.default = '0';
++		o.readonly = true;
++		o.cfgvalue = function() { return '0'; };
+ 
+ 		o = s.option(form.Value, 'start_delay', _('Delay Start'));
+ 		o.description = _('Units: seconds');
+@@ -365,7 +367,9 @@ return view.extend({
+ 			o.value(port.id, port.label);
+ 		});
+ 	}		o = s.option(form.Flag, 'use_ubus', _('Use Ubus AT Daemon'));
+-		o.default = '0';
++		o.default = '1';
++		o.readonly = true;
++		o.cfgvalue = function() { return '1'; };
+ 
+ 
+ 		// Additional modem configuration (modal only)

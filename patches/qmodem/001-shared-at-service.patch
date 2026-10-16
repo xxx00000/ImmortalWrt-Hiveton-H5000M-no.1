@@ -1,0 +1,2193 @@
+diff --git a/application/tom_modem/Makefile b/application/tom_modem/Makefile
+index 7332753..8067dbb 100644
+--- a/application/tom_modem/Makefile
++++ b/application/tom_modem/Makefile
+@@ -14,20 +14,13 @@ define Package/$(PKG_NAME)
+   SECTION:=utils
+   CATEGORY:=Utilities
+   TITLE:=Fujr Modem Communite Tool
+-  DEPENDS:=+libubus +libubox +libjson-c +libblobmsg-json
++  DEPENDS:=+libubus +libubox +libjson-c +libblobmsg-json +ubus-at-daemon
+ endef
+ 
+ define Package/$(PKG_NAME)/config
+ 	config PACKAGE_$(PKG_NAME)_EARLY_RETURN
+ 		bool "Early return"
+ 		default y
+-	config PACKAGE_$(PKG_NAME)_ENABLE_UBUS_DAEMON
+-		bool "Enable UBUS daemon support"
+-		default y
+-		help
+-		  Enable UBUS daemon support for tom_modem.
+-		  When disabled, compiles tom_modem_v1 (TTY-only mode).
+-		  When enabled, allows switching between TTY and UBUS with -u flag.
+ endef
+ 
+ define Package/$(PKG_NAME)/description
+@@ -42,8 +35,8 @@ endef
+ define Build/Compile
+ 	$(MAKE) -C $(PKG_BUILD_DIR) \
+ 		$(TARGET_CONFIGURE_OPTS) \
+-		CFLAGS="$(TARGET_CFLAGS) $(if $(CONFIG_PACKAGE_$(PKG_NAME)_ENABLE_UBUS_DAEMON),-DENABLE_UBUS_DAEMON)" \
+-		ENABLE_UBUS_DAEMON=$(if $(CONFIG_PACKAGE_$(PKG_NAME)_ENABLE_UBUS_DAEMON),y,n)
++		CFLAGS="$(TARGET_CFLAGS) -DENABLE_UBUS_DAEMON" \
++		ENABLE_UBUS_DAEMON=y
+ endef
+ 
+ define Package/$(PKG_NAME)/install
+diff --git a/application/tom_modem/src/Makefile b/application/tom_modem/src/Makefile
+index 050c127..65358ba 100644
+--- a/application/tom_modem/src/Makefile
++++ b/application/tom_modem/src/Makefile
+@@ -1,25 +1,13 @@
+ TARGET = tom_modem
+-ENABLE_UBUS_DAEMON ?= n
+-
+-CFLAGS += -I$(TARGET_DIR)/usr/include
+-CFLAGS += -I$(TARGET_DIR)/usr/include/libubox
+-CFLAGS += -I$(TARGET_DIR)/usr/include/json-c
+-
+-# Check for UBUS daemon support
+-ifeq ($(ENABLE_UBUS_DAEMON),y)
+-    LDFLAGS += -L$(TARGET_DIR)/usr/lib
+-    LDFLAGS += -L$(TARGET_DIR)/lib
+-    LDFLAGS += -lubus -lubox -ljson-c -lblobmsg_json
+-    SRCS = main.c utils.c operations.c transport.c ttydevice.c ubus_client.c extlib/pdu.c extlib/ucs2_to_utf8.c
+-else
+-    # TTY-only mode (tom_modem_v1 compatibility)
+-    SRCS = main.c utils.c operations.c transport.c ttydevice.c extlib/pdu.c extlib/ucs2_to_utf8.c
+-endif
++override ENABLE_UBUS_DAEMON = y
++CFLAGS += -DENABLE_UBUS_DAEMON -I$(TARGET_DIR)/usr/include -I$(TARGET_DIR)/usr/include/libubox -I$(TARGET_DIR)/usr/include/json-c
++LDFLAGS += -L$(TARGET_DIR)/usr/lib -L$(TARGET_DIR)/lib -lubus -lubox -ljson-c -lblobmsg_json
++SRCS = main.c utils.c operations.c transport.c ubus_client.c extlib/pdu.c extlib/ucs2_to_utf8.c
+ 
+ OBJS = $(SRCS:.c=.o)
+ 
+ $(TARGET): $(OBJS)
+-	$(CC) $(LDFLAGS) -o $@ $^
++	$(CC) -o $@ $^ $(LDFLAGS)
+ 
+ %.o: %.c
+ 	$(CC) $(CFLAGS) -c $< -o $@
+diff --git a/application/tom_modem/src/main.c b/application/tom_modem/src/main.c
+index 401dca2..5af29b6 100644
+--- a/application/tom_modem/src/main.c
++++ b/application/tom_modem/src/main.c
+@@ -168,12 +168,9 @@ int parse_user_input(int argc, char *argv[], PROFILE_T *profile)
+         profile->op = AT_OP;
+     }
+     
+-    // Default transport is TTY
+-    if (profile->transport != TRANSPORT_UBUS)
+-    {
+-        profile->transport = TRANSPORT_TTY;
+-    }
+-    
++    if (profile->timeout < 1 || profile->timeout > 60) return INVALID_PARAM;
++    profile->transport = TRANSPORT_UBUS;
++
+     return SUCCESS;
+ }
+ 
+@@ -243,13 +240,15 @@ static void atexit_cleanup(void)
+ 
+ static void signal_cleanup(int sig __attribute__((unused)))
+ {
+-    clean_up(sig);
++    /* Async signal handlers cannot call libubus. Server TTL recovers the lease. */
++    _exit(128 + sig);
+ }
+ 
+ int main(int argc, char *argv[])
+ {
+     PROFILE_T *profile = &s_profile;
+-    parse_user_input(argc, argv, profile);
++    int parsed = parse_user_input(argc, argv, profile);
++    if (parsed != SUCCESS) return 2;
+     dump_profile();
+     
+     // Initialize transport layer
+@@ -291,19 +290,11 @@ int main(int argc, char *argv[])
+         return COMM_ERROR;
+     }
+     
+-    // Run operation
+-    if (run_op(profile, &s_transport))
+-    {
+-        err_msg("Failed to run operation %d", profile->op);
+-#ifdef USE_SEMAPHORE
+-        if (profile->transport == TRANSPORT_TTY && unlock_at_port(profile->tty_dev))
+-        {
+-            err_msg("Failed to unlock tty device");
+-        }
+-#endif
+-        kill(getpid(), SIGINT); 
++    int result = run_op(profile, &s_transport);
++    int released = transport_close_device(&s_transport, profile);
++    if (result != SUCCESS || released != 0) {
++        err_msg("Operation or shared AT release failed");
++        return 1;
+     }
+-    
+-    dbg_msg("Exit");
+     return SUCCESS;
+ }
+diff --git a/application/tom_modem/src/modem_types.h b/application/tom_modem/src/modem_types.h
+index dc7781a..19770c0 100644
+--- a/application/tom_modem/src/modem_types.h
++++ b/application/tom_modem/src/modem_types.h
+@@ -61,7 +61,7 @@
+ #define READ_ALL_SMS "AT+CMGL=4"
+ #define READ_UNREAD_SMS "AT+CMGL=0"
+ #define MARK_SMS_READ "AT+CMGR=%d"
+-#define SEND_SMS "AT+CMGS=%d\r\n"
++#define SEND_SMS "AT+CMGS=%d"
+ #define DELETE_SMS "AT+CMGD=%d"
+ 
+ #define SMS_BUF_SIZE 262144
+diff --git a/application/tom_modem/src/operations.c b/application/tom_modem/src/operations.c
+index d62c45d..36ef7ba 100644
+--- a/application/tom_modem/src/operations.c
++++ b/application/tom_modem/src/operations.c
+@@ -1,4 +1,5 @@
+ #include "operations.h"
++#include <ctype.h>
+ 
+ int at(PROFILE_T *profile, void *transport_ptr)
+ {
+@@ -153,14 +154,20 @@ int sms_send(PROFILE_T *profile, void *transport_ptr)
+         return INVALID_PARAM;
+     }
+ 
+-    int pdu_len = strlen(profile->sms_pdu);
+-    int pdu_expected_len = (pdu_len) / 2 - 1;
++    /* The SMSC length octet excludes itself; TPDU length excludes the SMSC.
++     * Match the shared Web transport's 255-octet TPDU envelope. */
++    enum { MAX_TPDU_BYTES = 255, MAX_SMSC_BYTES = 255,
++           MAX_PDU_HEX = 2 * (1 + MAX_SMSC_BYTES + MAX_TPDU_BYTES) };
++    size_t pdu_len = strlen(profile->sms_pdu);
++    if (pdu_len < 4 || pdu_len > MAX_PDU_HEX || (pdu_len % 2)) return INVALID_PARAM;
++    for (size_t i = 0; i < pdu_len; i++) if (!isxdigit((unsigned char)profile->sms_pdu[i])) return INVALID_PARAM;
++    char smsc_length[3] = { profile->sms_pdu[0], profile->sms_pdu[1], 0 };
++    int pdu_expected_len = (int)(pdu_len / 2) - 1 - (int)strtol(smsc_length, NULL, 16);
++    if (pdu_expected_len <= 0 || pdu_expected_len > MAX_TPDU_BYTES) return INVALID_PARAM;
+     char send_sms_cmd[32];
+-    char pdu_hex[512];
+-    char send_sms_cmd2[514];
++    char send_sms_cmd2[MAX_PDU_HEX * 2 + 3];
+     char *send_sms_response = NULL;
+     int result;
+-    int ascii_code;
+     
+     // Set PDU format
+     result = transport_send_at_with_response(transport, profile, SET_PDU_FORMAT, "OK", 0, NULL);
+@@ -171,22 +178,22 @@ int sms_send(PROFILE_T *profile, void *transport_ptr)
+     dbg_msg("Set PDU format success");
+ 
+     snprintf(send_sms_cmd, 32, SEND_SMS, pdu_expected_len);
+-    for (int i = 0; i < pdu_len; i++) {
+-        //将字符串转换成字符串对应的十六进制的字符串
+-        ascii_code = profile->sms_pdu[i];
+-        snprintf(pdu_hex + (i * 2), 3, "%02X", ascii_code);
++    static const char hex[] = "0123456789ABCDEF";
++    for (size_t i = 0; i < pdu_len; i++) {
++        unsigned char ascii = (unsigned char)profile->sms_pdu[i];
++        send_sms_cmd2[i * 2] = hex[ascii >> 4];
++        send_sms_cmd2[i * 2 + 1] = hex[ascii & 15];
+     }
+-    pdu_hex[pdu_len * 2] = '\0'; // Add the end of transmission character
+-    snprintf(send_sms_cmd2, 514, "%s%s", pdu_hex, "1A"); // Append Ctrl+Z to indicate end of SMS
++    memcpy(send_sms_cmd2 + pdu_len * 2, "1A", 3); /* Ctrl+Z, then string NUL. */
+ 
+     // Send first AT command and wait for > prompt
+-    transport_send_at_only(transport, profile, send_sms_cmd, 0);
++    result = transport_send_at_with_response(transport, profile, send_sms_cmd, ">", 0, NULL);
++    if (result != SUCCESS) return result;
+     dbg_msg("Send SMS command: %s", send_sms_cmd);
+     dbg_msg("Write PDU command: %s", send_sms_cmd2);
+-    usleep(10000); // 10ms delay
+ 
+     // Send PDU data and wait for +CMGS response
+-    result = transport_send_at_with_response(transport, profile, send_sms_cmd2, "+CMGS:", 1, &send_sms_response);
++    result = transport_send_at_with_response(transport, profile, send_sms_cmd2, "OK", 1, &send_sms_response);
+     if (result != SUCCESS) {
+         dbg_msg("Error sending SMS PDU, error code: %d", result);
+         return result;
+diff --git a/application/tom_modem/src/transport.c b/application/tom_modem/src/transport.c
+index a6bd47c..808747a 100644
+--- a/application/tom_modem/src/transport.c
++++ b/application/tom_modem/src/transport.c
+@@ -2,120 +2,9 @@
+ #include "utils.h"
+ #include "operations.h"
+ 
+-// TTY transport operations implementation
+-static int tty_send_at_with_response(PROFILE_T *profile, const char *at_cmd, const char *end_flag, int is_raw, char **response_text) {
+-    FDS_T *fds = (FDS_T *)profile->transport_ctx;
+-    if (!fds || !fds->fdo || !fds->fdi) {
+-        err_msg("TTY device not opened");
+-        return COMM_ERROR;
+-    }
+-
+-    int w_ret, r_ret;
+-    AT_MESSAGE_T message = {0};
+-
+-    if (is_raw) {
+-        char *binary_cmd = malloc(strlen(at_cmd) / 2 + 1);
+-        if (!binary_cmd) {
+-            err_msg("Memory allocation failed");
+-            return COMM_ERROR;
+-        }
+-        
+-        int hex_ret = str_to_hex((char*)at_cmd, binary_cmd);
+-        if (hex_ret) {
+-            free(binary_cmd);
+-            err_msg("Invalid hex string");
+-            return INVALID_HEX;
+-        }
+-        
+-        w_ret = tty_write_raw(fds->fdo, binary_cmd);
+-        free(binary_cmd);
+-    } else {
+-        w_ret = tty_write(fds->fdo, at_cmd);
+-    }
+-
+-    if (w_ret) {
+-        err_msg("Failed to write AT command");
+-        return w_ret;
+-    }
+-
+-    if (end_flag) {
+-        r_ret = tty_read_keyword(fds->fdi, &message, (char*)end_flag, profile);
+-    } else {
+-        r_ret = tty_read(fds->fdi, &message, profile);
+-    }
+-
+-    if (r_ret && r_ret != KEYWORD_NOT_MATCH) {
+-        dbg_msg("Error reading AT response, error code: %d", r_ret);
+-        if (message.message) {
+-            free(message.message);
+-        }
+-        return r_ret;
+-    }
+-
+-    if (response_text && message.message) {
+-        *response_text = message.message;
+-    } else if (message.message) {
+-        free(message.message);
+-    }
+-
+-    return (r_ret == KEYWORD_NOT_MATCH) ? r_ret : SUCCESS;
+-}
+-
+-static int tty_send_at_only(PROFILE_T *profile, const char *at_cmd, int is_raw) {
+-    FDS_T *fds = (FDS_T *)profile->transport_ctx;
+-    if (!fds || !fds->fdo) {
+-        err_msg("TTY device not opened");
+-        return COMM_ERROR;
+-    }
+-
+-    int w_ret;
+-    if (is_raw) {
+-        char *binary_cmd = malloc(strlen(at_cmd) / 2 + 1);
+-        if (!binary_cmd) {
+-            err_msg("Memory allocation failed");
+-            return COMM_ERROR;
+-        }
+-        
+-        int hex_ret = str_to_hex((char*)at_cmd, binary_cmd);
+-        if (hex_ret) {
+-            free(binary_cmd);
+-            err_msg("Invalid hex string");
+-            return INVALID_HEX;
+-        }
+-        
+-        w_ret = tty_write_raw(fds->fdo, binary_cmd);
+-        free(binary_cmd);
+-    } else {
+-        w_ret = tty_write(fds->fdo, at_cmd);
+-    }
+-
+-    return w_ret;
+-}
+-
+-static int tty_open_device_transport(PROFILE_T *profile, void *ctx) {
+-    FDS_T *fds = (FDS_T *)ctx;
+-    return tty_open_device(profile, fds);
+-}
+-
+-static int tty_close_device_transport(PROFILE_T *profile, void *ctx) {
+-    FDS_T *fds = (FDS_T *)ctx;
+-    if (fds && fds->tty_fd >= 0) {
+-        if (tcsetattr(fds->tty_fd, TCSANOW, &fds->old_termios) != 0) {
+-            err_msg("Error restoring old tty attributes");
+-        }
+-        tcflush(fds->tty_fd, TCIOFLUSH);
+-        close(fds->tty_fd);
+-        fds->tty_fd = -1;
+-    }
+-    return SUCCESS;
+-}
+-
+-const transport_ops_t tty_transport_ops = {
+-    .send_at_with_response = tty_send_at_with_response,
+-    .send_at_only = tty_send_at_only,
+-    .open_device = tty_open_device_transport,
+-    .close_device = tty_close_device_transport
+-};
++#ifndef ENABLE_UBUS_DAEMON
++#error "Shared AT builds require the ubus daemon; direct TTY transport is disabled"
++#endif
+ 
+ #ifdef ENABLE_UBUS_DAEMON
+ // UBUS transport operations implementation  
+@@ -200,15 +89,9 @@ int transport_init(transport_t *transport, transport_type_t type) {
+     
+     switch (type) {
+         case TRANSPORT_TTY:
+-            transport->ops = &tty_transport_ops;
+-            transport->ctx.tty_fds = malloc(sizeof(FDS_T));
+-            if (!transport->ctx.tty_fds) {
+-                err_msg("Failed to allocate TTY context");
+-                return COMM_ERROR;
+-            }
+-            memset(transport->ctx.tty_fds, 0, sizeof(FDS_T));
+-            break;
+-            
++            err_msg("Direct TTY transport is disabled; use shared ubus AT");
++            return COMM_ERROR;
++
+ #ifdef ENABLE_UBUS_DAEMON
+         case TRANSPORT_UBUS:
+             transport->ops = &ubus_transport_ops;
+diff --git a/application/tom_modem/src/ubus_client.c b/application/tom_modem/src/ubus_client.c
+index bd90daf..8d1a685 100644
+--- a/application/tom_modem/src/ubus_client.c
++++ b/application/tom_modem/src/ubus_client.c
+@@ -1,5 +1,7 @@
+ #include "ubus_client.h"
+ #include "utils.h"
++#include <fcntl.h>
++#include <time.h>
+ 
+ 
+ static ubus_client_t g_ubus_client = {0};
+@@ -9,7 +11,20 @@ int ubus_client_init(ubus_client_t *client) {
+         return -1;
+     }
+     
+-    client->ctx = ubus_connect(NULL);
++    unsigned char random[32];
++    int fd = open("/dev/urandom", O_RDONLY);
++    if (fd < 0) return -1;
++    size_t used = 0;
++    while (used < sizeof(random)) {
++        ssize_t n = read(fd, random + used, sizeof(random) - used);
++        if (n < 0 && errno == EINTR) continue;
++        if (n <= 0) { close(fd); return -1; }
++        used += (size_t)n;
++    }
++    close(fd);
++    for (size_t i = 0; i < sizeof(random); i++) sprintf(client->owner + 2 * i, "%02x", random[i]);
++    client->leased_port[0] = 0;
++    client->ctx = ubus_connect(getenv("UBUS_SOCKET"));
+     if (!client->ctx) {
+         err_msg("Failed to connect to ubus");
+         return -1;
+@@ -22,6 +37,7 @@ int ubus_client_init(ubus_client_t *client) {
+ 
+ void ubus_client_cleanup(ubus_client_t *client) {
+     if (client && client->ctx) {
++        if (client->leased_port[0]) ubus_at_close_device(client, client->leased_port);
+         ubus_free(client->ctx);
+         client->ctx = NULL;
+         client->connected = 0;
+@@ -39,64 +55,60 @@ static uint32_t find_service_id(struct ubus_context *ctx, const char *service_na
+     return id;
+ }
+ 
+-int ubus_at_open_device(ubus_client_t *client, const char *device_path, 
+-                        int baud_rate, int data_bits, int parity, int stop_bits) {
+-    if (!client || !client->connected || !device_path) {
+-        return -1;
+-    }
+-    
++static void lease_callback(struct ubus_request *req, int type, struct blob_attr *msg) {
++    (void)type;
++    struct blob_attr *tb[1];
++    static const struct blobmsg_policy policy[] = { { .name = "status", .type = BLOBMSG_TYPE_STRING } };
++    if (!msg) return;
++    blobmsg_parse(policy, 1, tb, blob_data(msg), blob_len(msg));
++    if (!tb[0]) return;
++    const char *status = blobmsg_get_string(tb[0]);
++    *(int *)req->priv = !strcmp(status, "success") ? 0 : !strcmp(status, "busy") ? 1 : -1;
++}
++static long monotonic_ms(void) {
++    struct timespec now; clock_gettime(CLOCK_MONOTONIC, &now);
++    return (long)now.tv_sec * 1000 + now.tv_nsec / 1000000;
++}
++int ubus_at_open_device(ubus_client_t *client, const char *device_path,
++                       int baud_rate, int data_bits, int parity, int stop_bits) {
++    if (!client || !client->connected || !device_path ||
++        strlen(device_path) >= sizeof(client->leased_port) || data_bits != 8 || parity || stop_bits != 1) return -1;
+     uint32_t service_id = find_service_id(client->ctx, UBUS_AT_DAEMON_SERVICE);
+-    if (!service_id) {
+-        return -1;
+-    }
+-    
+-    struct blob_buf b = {0};
+-    blob_buf_init(&b, 0);
++    if (!service_id) return -1;
++    struct blob_buf b = {0}; blob_buf_init(&b, 0);
+     blobmsg_add_string(&b, "at_port", device_path);
+-    blobmsg_add_u32(&b, "baudrate", baud_rate);
+-    blobmsg_add_u32(&b, "databits", data_bits);
+-    blobmsg_add_u32(&b, "parity", parity);
+-    blobmsg_add_u32(&b, "stopbits", stop_bits);
+-    
+-    int ret = ubus_invoke(client->ctx, service_id, "open", b.head, NULL, NULL, 5000);
+-    blob_buf_free(&b);
+-    
+-    if (ret != UBUS_STATUS_OK) {
+-        err_msg("Failed to open AT device via ubus: %s", ubus_strerror(ret));
+-        return -1;
++    blobmsg_add_string(&b, "owner", client->owner);
++    blobmsg_add_u32(&b, "ttl", 120); blobmsg_add_u32(&b, "baudrate", baud_rate);
++    long deadline = monotonic_ms() + 70000; int result = -1;
++    for (int attempt = 0; attempt < 20; attempt++) {
++        long remaining = deadline - monotonic_ms();
++        if (remaining <= 0) break;
++        result = -1;
++        int ret = ubus_invoke(client->ctx, service_id, "acquire", b.head, lease_callback,
++                              &result, remaining > 65000 ? 65000 : (int)remaining);
++        if (ret || result != 1) { if (ret) result = -1; break; }
++        usleep(250000);
+     }
+-    
+-    dbg_msg("Opened AT device %s via ubus", device_path);
+-    return 0;
++    blob_buf_free(&b);
++    if (result == 0) strcpy(client->leased_port, device_path);
++    else err_msg("AT lease unavailable or invalid; no direct transport fallback");
++    return result == 0 ? 0 : -1;
+ }
+-
+ int ubus_at_close_device(ubus_client_t *client, const char *device_path) {
+-    if (!client || !client->connected || !device_path) {
+-        return -1;
+-    }
+-    
+-    uint32_t service_id = find_service_id(client->ctx, UBUS_AT_DAEMON_SERVICE);
+-    if (!service_id) {
+-        return -1;
+-    }
+-    
+-    struct blob_buf b = {0};
+-    blob_buf_init(&b, 0);
++    if (!client || !client->connected || !device_path || !client->leased_port[0]) return -1;
++    uint32_t id = find_service_id(client->ctx, UBUS_AT_DAEMON_SERVICE);
++    if (!id) return -1;
++    struct blob_buf b = {0}; blob_buf_init(&b, 0);
+     blobmsg_add_string(&b, "at_port", device_path);
+-    
+-    int ret = ubus_invoke(client->ctx, service_id, "close", b.head, NULL, NULL, 5000);
+-    blob_buf_free(&b);
+-    
+-    if (ret != UBUS_STATUS_OK) {
+-        err_msg("Failed to close AT device via ubus: %s", ubus_strerror(ret));
+-        return -1;
+-    }
+-    
+-    dbg_msg("Closed AT device %s via ubus", device_path);
+-    return 0;
++    blobmsg_add_string(&b, "owner", client->owner);
++    int status = -1;
++    int ret = ubus_invoke(client->ctx, id, "release", b.head, lease_callback, &status, 65000);
++    blob_buf_free(&b); client->leased_port[0] = 0;
++    return ret || status ? -1 : 0;
+ }
+ 
+ static void ubus_sendat_callback(struct ubus_request *req, int type, struct blob_attr *msg) {
++    (void)type;
+     ubus_at_response_t *response = (ubus_at_response_t *)req->priv;
+     
+     if (!response || !msg) {
+@@ -137,7 +149,9 @@ static void ubus_sendat_callback(struct ubus_request *req, int type, struct blob
+ int ubus_send_at_command(ubus_client_t *client, const char *device_path,
+                          const char *at_cmd, int timeout, const char *end_flag,
+                          int is_raw, ubus_at_response_t *response) {
+-    if (!client || !client->connected || !device_path || !at_cmd || !response) {
++    if (response) { memset(response, 0, sizeof(*response)); response->status = -1; }
++    if (!client || !client->connected || !device_path || !at_cmd || !response ||
++        !client->leased_port[0] || strcmp(client->leased_port, device_path) || timeout < 1 || timeout > 60) {
+         return -1;
+     }
+     
+@@ -153,8 +167,7 @@ int ubus_send_at_command(ubus_client_t *client, const char *device_path,
+     struct blob_buf b = {0};
+     blob_buf_init(&b, 0);
+     blobmsg_add_string(&b, "at_port", device_path);
+-    //add boolean for sendonly
+-    //blobmsg_add_u8(&b, "sendonly", 1);
++    blobmsg_add_string(&b, "owner", client->owner);
+     if (is_raw) {
+         blobmsg_add_string(&b, "raw_at_content", at_cmd);
+     } else {
+@@ -168,7 +181,7 @@ int ubus_send_at_command(ubus_client_t *client, const char *device_path,
+     }
+     
+     int ret = ubus_invoke(client->ctx, service_id, "sendat", b.head, 
+-                         ubus_sendat_callback, response, timeout * 1000 + 1000);
++                         ubus_sendat_callback, response, timeout * 1000 + 65000);
+     blob_buf_free(&b);
+     
+     if (ret != UBUS_STATUS_OK) {
+@@ -182,39 +195,10 @@ int ubus_send_at_command(ubus_client_t *client, const char *device_path,
+ 
+ int ubus_send_at_command_only(ubus_client_t *client, const char *device_path,
+                               const char *at_cmd, int is_raw) {
+-    if (!client || !client->connected || !device_path || !at_cmd) {
+-        return -1;
+-    }
+-    
+-    uint32_t service_id = find_service_id(client->ctx, UBUS_AT_DAEMON_SERVICE);
+-    if (!service_id) {
+-        return -1;
+-    }
+-    
+-    struct blob_buf b = {0};
+-    blob_buf_init(&b, 0);
+-    blobmsg_add_string(&b, "at_port", device_path);
+-    blobmsg_add_u8(&b, "sendonly", 1);  // Set sendonly flag to true
+-    
+-    if (is_raw) {
+-        blobmsg_add_string(&b, "raw_at_content", at_cmd);
+-    } else {
+-        blobmsg_add_string(&b, "at_cmd", at_cmd);
+-    }
+-    
+-    blobmsg_add_u32(&b, "timeout", 1000);  // Set minimal timeout for sendonly mode
+-    
+-    int ret = ubus_invoke(client->ctx, service_id, "sendat", b.head, 
+-                         NULL, NULL, 2000);  // No callback needed for sendonly
+-    blob_buf_free(&b);
+-    
+-    if (ret != UBUS_STATUS_OK) {
+-        err_msg("Failed to send AT command (sendonly) via ubus: %s", ubus_strerror(ret));
+-        return -1;
+-    }
+-    
+-    dbg_msg("Sent AT command (sendonly) via ubus: %s", at_cmd);
+-    return 0;
++    /* Legacy CLI spelling still consumes the terminal response. */
++    ubus_at_response_t response = {0};
++    int result = ubus_send_at_command(client, device_path, at_cmd, 3, NULL, is_raw, &response);
++    ubus_at_response_free(&response); return result;
+ }
+ 
+ void ubus_at_response_free(ubus_at_response_t *response) {
+diff --git a/application/tom_modem/src/ubus_client.h b/application/tom_modem/src/ubus_client.h
+index 9d56420..2c090a4 100644
+--- a/application/tom_modem/src/ubus_client.h
++++ b/application/tom_modem/src/ubus_client.h
+@@ -19,6 +19,8 @@
+ typedef struct {
+     struct ubus_context *ctx;
+     int connected;
++    char owner[65];
++    char leased_port[256];
+ } ubus_client_t;
+ 
+ // AT response structure for ubus
+diff --git a/application/tom_modem/tests/test_sms_transaction.c b/application/tom_modem/tests/test_sms_transaction.c
+new file mode 100644
+index 0000000..38b3d5b
+--- /dev/null
++++ b/application/tom_modem/tests/test_sms_transaction.c
+@@ -0,0 +1,62 @@
++/* Exercise the real sms_send operation with its transport boundary controlled.
++ * Prompt failure prevents payload writes; valid full-size PDUs remain intact. */
++#include "operations.h"
++#include "transport.h"
++#include <assert.h>
++#include <string.h>
++PROFILE_T s_profile;
++static int calls, fail_prompt;
++static const char *expected_cmgs = "AT+CMGS=2";
++static int large_pdu;
++static int nibble(char c) {
++    if (c >= '0' && c <= '9') return c - '0';
++    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
++    assert(!"Invalid emitted payload hex"); return -1;
++}
++int transport_send_at_with_response(transport_t *t, PROFILE_T *p, const char *cmd,
++                                   const char *end, int raw, char **response) {
++    (void)t; calls++;
++    if (calls == 1) { assert(!strcmp(cmd, "AT+CMGF=0")); assert(!raw); }
++    if (calls == 2) { assert(!strcmp(cmd, expected_cmgs)); assert(!strcmp(end, ">")); return fail_prompt ? COMM_ERROR : SUCCESS; }
++    if (calls == 3) {
++        assert(raw); assert(!strcmp(end, "OK"));
++        if (!large_pdu) assert(!strcmp(cmd, "3030303130321A"));
++        else {
++            size_t len = strlen(p->sms_pdu);
++            assert(strlen(cmd) == len * 2 + 2);
++            for (size_t i = 0; i < len; i++)
++                assert((nibble(cmd[2*i]) * 16 + nibble(cmd[2*i+1])) == p->sms_pdu[i]);
++            assert(!strcmp(cmd + len * 2, "1A"));
++        }
++        *response = strdup("\r\n+CMGS: 1\r\nOK\r\n");
++    }
++    return SUCCESS;
++}
++int transport_send_at_only(transport_t *t, PROFILE_T *p, const char *cmd, int raw) {
++    (void)t; (void)p; (void)cmd; (void)raw; assert(!"SMS must wait for prompt"); return COMM_ERROR;
++}
++int main(void) {
++    PROFILE_T p = {0}; transport_t t = {0}; p.sms_pdu = "000102";
++    fail_prompt = 1; assert(sms_send(&p, &t) == COMM_ERROR); assert(calls == 2);
++    calls = 0; fail_prompt = 0; assert(sms_send(&p, &t) == SUCCESS); assert(calls == 3);
++    calls = 0; p.sms_pdu = "00zz"; assert(sms_send(&p, &t) == INVALID_PARAM); assert(calls == 0);
++
++    /* 70 UCS2 characters, destination 12345678901, 140 user-data bytes. */
++    char ucs2[311]; strcpy(ucs2, "0011000B912143658709F10008AA8C");
++    for (int i = 0; i < 70; i++) strcat(ucs2, "0041");
++    assert(strlen(ucs2) == 310);
++    calls = 0; large_pdu = 1; expected_cmgs = "AT+CMGS=154"; p.sms_pdu = ucs2;
++    assert(sms_send(&p, &t) == SUCCESS); assert(calls == 3);
++
++    /* Maximum transport envelope: SMSC length octet + 255 SMSC + 255 TPDU. */
++    char maximum[1023]; maximum[0] = maximum[1] = 'F';
++    memset(maximum + 2, 'A', 1020); maximum[1022] = 0;
++    calls = 0; expected_cmgs = "AT+CMGS=255"; p.sms_pdu = maximum;
++    assert(sms_send(&p, &t) == SUCCESS); assert(calls == 3);
++    /* A 256-byte TPDU with default SMSC is rejected before any modem writes. */
++    char too_long[515]; too_long[0] = too_long[1] = '0';
++    memset(too_long + 2, 'A', 512); too_long[514] = 0;
++    calls = 0; p.sms_pdu = too_long;
++    assert(sms_send(&p, &t) == INVALID_PARAM); assert(calls == 0);
++    puts("PASS SMS prompt/payload/final response, 70 UCS2 characters, maximum PDU and TPDU bounds");
++}
+diff --git a/application/ubus_at_daemon/Makefile b/application/ubus_at_daemon/Makefile
+index 10079d5..48d6c55 100644
+--- a/application/ubus_at_daemon/Makefile
++++ b/application/ubus_at_daemon/Makefile
+@@ -28,8 +28,8 @@ endef
+ define Build/Compile
+ 	$(MAKE) -C $(PKG_BUILD_DIR) \
+ 		$(TARGET_CONFIGURE_OPTS) \
+-		CFLAGS="$(TARGET_CFLAGS) -I$(STAGING_DIR)/usr/include" \
+-		LDFLAGS="$(TARGET_LDFLAGS) -lubus -lubox -lblobmsg_json -ljson-c"
++		CFLAGS="$(TARGET_CFLAGS) -D_GNU_SOURCE -std=gnu99 -I$(STAGING_DIR)/usr/include" \
++		LDFLAGS="$(TARGET_LDFLAGS) -lubus -lubox -lblobmsg_json -ljson-c -lpthread"
+ endef
+ 
+ define Package/$(PKG_NAME)/install
+diff --git a/application/ubus_at_daemon/files/etc/config/ubus-at-daemon b/application/ubus_at_daemon/files/etc/config/ubus-at-daemon
+index 28e69bf..c2c4fb3 100644
+--- a/application/ubus_at_daemon/files/etc/config/ubus-at-daemon
++++ b/application/ubus_at_daemon/files/etc/config/ubus-at-daemon
+@@ -1,11 +1,4 @@
+ config ubus-at-daemon 'main'
+     option enabled '1'
+-    option config_file '/etc/ubus-at-daemon.json'
+ 
+-config port
+-    option at_port '/dev/ttyUSB2'
+-    option baudrate '115200'
+-    option databits '8'
+-    option parity '0'
+-    option stopbits '1'
+-    option timeout '5'
++# Actual serial/TCP endpoints are opened only by owned operation leases.
+diff --git a/application/ubus_at_daemon/files/etc/init.d/ubus-at-daemon b/application/ubus_at_daemon/files/etc/init.d/ubus-at-daemon
+index b8bf1c8..8098aa5 100644
+--- a/application/ubus_at_daemon/files/etc/init.d/ubus-at-daemon
++++ b/application/ubus_at_daemon/files/etc/init.d/ubus-at-daemon
+@@ -1,6 +1,6 @@
+ #!/bin/sh /etc/rc.common
+ 
+-START=99
++START=70
+ STOP=10
+ 
+ USE_PROCD=1
+diff --git a/application/ubus_at_daemon/src/Makefile b/application/ubus_at_daemon/src/Makefile
+index 13e7d2a..1eabe96 100644
+--- a/application/ubus_at_daemon/src/Makefile
++++ b/application/ubus_at_daemon/src/Makefile
+@@ -20,7 +20,7 @@ LDFLAGS += -L$(TARGET_DIR)/lib
+ LDFLAGS += -lubus -lubox -lblobmsg_json -ljson-c -lpthread
+ 
+ TARGET = ubus-at-daemon
+-SOURCES = main.c port_manager.c at_handler.c event_callback.c config_loader.c line_events.c
++SOURCES = main.c port_manager.c at_handler.c event_callback.c config_loader.c line_events.c session.c
+ OBJECTS = $(SOURCES:.c=.o)
+ 
+ .PHONY: all clean install debug
+diff --git a/application/ubus_at_daemon/src/at_handler.c b/application/ubus_at_daemon/src/at_handler.c
+index f006286..5766ada 100644
+--- a/application/ubus_at_daemon/src/at_handler.c
++++ b/application/ubus_at_daemon/src/at_handler.c
+@@ -1,15 +1,20 @@
+ #include "ubus_at_daemon.h"
+ #include <time.h>
+ #include <errno.h>
++#include <ctype.h>
++#include <poll.h>
++#include <sys/socket.h>
+ 
+ extern at_daemon_ctx_t g_daemon_ctx;
+ 
+ char *hex_to_string(const char *hex_str) {
+     size_t hex_len = strlen(hex_str);
+-    if (hex_len % 2 != 0) {
++    if (!hex_len || hex_len % 2 != 0) {
+         return NULL; // Invalid hex string
+     }
+     
++    for (size_t i = 0; i < hex_len; i++)
++        if (!isxdigit((unsigned char)hex_str[i])) return NULL;
+     size_t result_len = hex_len / 2;
+     char *result = malloc(result_len + 1);
+     if (!result) {
+@@ -95,6 +100,16 @@ int check_end_flags(at_port_instance_t *port, const char *line, char *matched_fl
+         start[--trimmed_len] = '\0';
+     }
+     
++    /* Errors always terminate, including when waiting for an SMS prompt. */
++    const char *errors[] = { "ERROR", "+CME ERROR:", "+CMS ERROR:", "NO CARRIER" };
++    for (size_t i = 0; i < sizeof(errors) / sizeof(errors[0]); ++i) {
++        size_t n = strlen(errors[i]);
++        if (!strncmp(start, errors[i], n) &&
++            (!start[n] || start[n] == ' ' || errors[i][n - 1] == ':')) {
++            if (matched_flag) strcpy(matched_flag, errors[i]);
++            return 1;
++        }
++    }
+     // Check each end flag
+     for (int i = 0; i < port->num_end_flags; i++) {
+         const char *flag = port->expected_end_flags[i];
+@@ -121,6 +136,8 @@ int check_end_flags(at_port_instance_t *port, const char *line, char *matched_fl
+ }
+ 
+ int send_at_command_with_response(at_port_instance_t *port, const char *cmd, int timeout, const char *end_flag, int is_raw, at_response_t *response) {
++    if (!response) return -2;
++    memset(response, 0, sizeof(*response)); response->status = -2;
+     int is_open;
+ 
+     pthread_mutex_lock(&port->state_mutex);
+@@ -144,18 +161,18 @@ int send_at_command_with_response(at_port_instance_t *port, const char *cmd, int
+     // Record start time
+     clock_gettime(CLOCK_REALTIME, &response->start_time);
+     
+-    // Parse end flags
+-    parse_end_flags(port, end_flag);
+-    
++    pthread_mutex_lock(&port->queue_mutex);
+     pthread_mutex_lock(&port->response_mutex);
++    parse_end_flags(port, end_flag);
+     
+     // Clear previous response and prepare for new one
+     memset(&port->current_response, 0, sizeof(at_response_t));
+     port->current_response.start_time = response->start_time;
+     port->active_command_id = ++port->next_command_id;
+     port->waiting_for_response = 1;
+-    
++    port->current_response.status = -2;
+     pthread_mutex_unlock(&port->response_mutex);
++    pthread_mutex_unlock(&port->queue_mutex);
+     
+     // Send command
+     pthread_mutex_lock(&port->write_mutex);
+@@ -167,35 +184,60 @@ int send_at_command_with_response(at_port_instance_t *port, const char *cmd, int
+         send_data = hex_to_string(cmd);
+         if (!send_data) {
+             pthread_mutex_unlock(&port->write_mutex);
+-            port->waiting_for_response = 0;
+-            return -1;
++            pthread_mutex_lock(&port->response_mutex);
++            port->waiting_for_response = 0; port->active_command_id = 0;
++            pthread_mutex_unlock(&port->response_mutex);
++            return -2;
+         }
+-        send_len = strlen(send_data);
++        send_len = strlen(cmd) / 2;
+     } else {
+         send_len = strlen(cmd) + strlen(AT_CMD_TERMINATOR);
+         send_data = malloc(send_len + 1);
+         if (!send_data) {
+             pthread_mutex_unlock(&port->write_mutex);
+-            port->waiting_for_response = 0;
+-            return -1;
++            pthread_mutex_lock(&port->response_mutex);
++            port->waiting_for_response = 0; port->active_command_id = 0;
++            pthread_mutex_unlock(&port->response_mutex);
++            return -2;
+         }
+         strcpy(send_data, cmd);
+         strcat(send_data, AT_CMD_TERMINATOR);
+     }
+     
+-    pthread_mutex_lock(&port->state_mutex);
+-    ssize_t written = port->is_open && port->fd >= 0 ?
+-        write(port->fd, send_data, send_len) : -1;
+-    pthread_mutex_unlock(&port->state_mutex);
++    size_t sent = 0;
++    struct timespec start; clock_gettime(CLOCK_MONOTONIC, &start);
++    while (sent < send_len) {
++        pthread_mutex_lock(&port->state_mutex);
++        int fd = port->fd;
++        ssize_t written = -1;
++        if (port->is_open && fd >= 0) {
++#ifdef MSG_NOSIGNAL
++            written = port->is_tcp ? send(fd, send_data + sent, send_len - sent, MSG_NOSIGNAL) :
++                write(fd, send_data + sent, send_len - sent);
++#else
++            written = write(fd, send_data + sent, send_len - sent);
++#endif
++        }
++        int error = errno;
++        pthread_mutex_unlock(&port->state_mutex);
++        if (written > 0) { sent += (size_t)written; continue; }
++        if (written == -1 && (error == EINTR || error == EAGAIN || error == EWOULDBLOCK)) {
++            struct timespec now; clock_gettime(CLOCK_MONOTONIC, &now);
++            if (now.tv_sec - start.tv_sec >= timeout) break;
++            struct pollfd p = { .fd = fd, .events = POLLOUT };
++            poll(&p, 1, 20); continue;
++        }
++        break;
++    }
+     free(send_data);
+-    
+     pthread_mutex_unlock(&port->write_mutex);
+-    
+-    if (written != (ssize_t)send_len) {
+-        port->waiting_for_response = 0;
+-        return -1;
++    if (sent != send_len) {
++        pthread_mutex_lock(&port->response_mutex);
++        port->waiting_for_response = 0; port->active_command_id = 0;
++        pthread_mutex_unlock(&port->response_mutex);
++        return -2;
+     }
+-    
++
+     // Wait for response
+     pthread_mutex_lock(&port->response_mutex);
+     
+@@ -259,7 +301,7 @@ int send_at_command_only(at_port_instance_t *port, const char *cmd, int is_raw)
+             pthread_mutex_unlock(&port->write_mutex);
+             return -1;
+         }
+-        send_len = strlen(send_data);
++        send_len = strlen(cmd) / 2;
+     } else {
+         send_len = strlen(cmd);
+         send_data = malloc(send_len + 1);
+@@ -318,6 +360,12 @@ void *reader_thread_func(void *arg) {
+                     memcpy(port->current_response.response + current_len, temp_buffer, bytes_read);
+                     port->current_response.response_len = current_len + bytes_read;
+                     port->current_response.response[port->current_response.response_len] = '\0';
++                } else {
++                    /* A truncated response is not a successful command. */
++                    port->current_response.status = -2;
++                    port->waiting_for_response = 0;
++                    port->quarantined = 1;
++                    pthread_cond_signal(&port->response_cond);
+                 }
+             }
+             pthread_mutex_unlock(&port->response_mutex);
+@@ -366,7 +414,9 @@ void *reader_thread_func(void *arg) {
+                                     clock_gettime(CLOCK_REALTIME, &port->current_response.end_time);
+                                     
+                                     strcpy(port->current_response.end_flag_matched, matched_flag);
+-                                    port->current_response.status = 0;  // success
++                                    port->current_response.status =
++                                        (!strcmp(matched_flag, "ERROR") || !strncmp(matched_flag, "+CM", 3) ||
++                                         !strcmp(matched_flag, "NO CARRIER")) ? -2 : 0;
+                                     port->waiting_for_response = 0;
+                                     pthread_cond_signal(&port->response_cond);
+                                 }
+@@ -374,13 +424,19 @@ void *reader_thread_func(void *arg) {
+                             }
+                         }
+ 
+-                        if (!is_echo) {
++                        pthread_mutex_lock(&port->response_mutex);
++                        int discard = port->quarantined;
++                        pthread_mutex_unlock(&port->response_mutex);
++                        if (!is_echo && !discard) {
+                             at_correlation_t correlation = AT_CORRELATION_IDLE;
+                             if (is_terminal)
+                                 correlation = AT_CORRELATION_TERMINAL;
+                             else if (was_waiting &&
+                                      (!strcmp(line_start, "RING") ||
+-                                      !strncmp(line_start, "+CLIP:", 6)))
++                                      !strncmp(line_start, "+CLIP:", 6) ||
++                                      !strncmp(line_start, "+CMTI:", 6) ||
++                                      !strncmp(line_start, "+CMT:", 5) ||
++                                      !strncmp(line_start, "+CUSD:", 6)))
+                                 correlation = AT_CORRELATION_AMBIGUOUS;
+                             else if (was_waiting)
+                                 correlation = AT_CORRELATION_RESPONSE;
+@@ -408,11 +464,27 @@ void *reader_thread_func(void *arg) {
+                 port->read_buffer[0] = '\0';
+             }
+             
++            /* SMS prompts conventionally have no CRLF. Match only the entire
++             * remaining line; a '>' embedded in a normal response is not a prompt. */
++            pthread_mutex_lock(&port->response_mutex);
++            if (port->waiting_for_response &&
++                (!strcmp(port->read_buffer, ">") || !strcmp(port->read_buffer, "> "))) {
++                char matched[64];
++                if (check_end_flags(port, port->read_buffer, matched) && !strcmp(matched, ">")) {
++                    strcpy(port->current_response.end_flag_matched, ">");
++                    port->current_response.status = 0;
++                    port->waiting_for_response = 0;
++                    port->buffer_pos = 0; port->read_buffer[0] = 0;
++                    pthread_cond_signal(&port->response_cond);
++                }
++            }
++            pthread_mutex_unlock(&port->response_mutex);
+             pthread_mutex_unlock(&port->queue_mutex);
+-        } else if (bytes_read < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
++        } else if ((bytes_read == 0 && port->is_tcp) ||
++                   (bytes_read < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)) {
+             // Error reading, mark port as closed
+-            fprintf(stderr, "Error reading from port %s: %s, marking as closed\n", 
+-                    port->port_path, strerror(errno));
++            fprintf(stderr, "Port %s closed: %s\n", port->port_path,
++                    bytes_read == 0 ? "TCP peer disconnected" : strerror(errno));
+             pthread_mutex_lock(&port->state_mutex);
+             if (port->reader_thread_valid &&
+                 pthread_equal(pthread_self(), port->reader_thread)) {
+@@ -420,6 +492,11 @@ void *reader_thread_func(void *arg) {
+                 port->should_stop = 1;
+             }
+             pthread_mutex_unlock(&port->state_mutex);
++            pthread_mutex_lock(&port->response_mutex);
++            port->current_response.status = -2;
++            port->waiting_for_response = 0;
++            pthread_cond_signal(&port->response_cond);
++            pthread_mutex_unlock(&port->response_mutex);
+             break;
+         }
+         
+diff --git a/application/ubus_at_daemon/src/const.h b/application/ubus_at_daemon/src/const.h
+index 7bcfa04..db6f973 100644
+--- a/application/ubus_at_daemon/src/const.h
++++ b/application/ubus_at_daemon/src/const.h
+@@ -19,7 +19,7 @@
+ #define MAX_BUFFER_SIZE 32768
+ #define MAX_QUEUE_SIZE 100
+ #define MAX_AT_CMD_SIZE 512
+-#define MAX_PORT_PATH_SIZE 64
++#define MAX_PORT_PATH_SIZE 256
+ #define MAX_SCRIPT_PATH_SIZE 256
+ #define MAX_REGEX_SIZE 128
+ #define MAX_PREFIX_SIZE 64
+diff --git a/application/ubus_at_daemon/src/main.c b/application/ubus_at_daemon/src/main.c
+index ae9382a..14e74cb 100644
+--- a/application/ubus_at_daemon/src/main.c
++++ b/application/ubus_at_daemon/src/main.c
+@@ -1,254 +1,97 @@
+ #include "ubus_at_daemon.h"
+ 
++#ifndef ARRAY_SIZE
+ #define ARRAY_SIZE(x) (sizeof(x) / sizeof((x)[0]))
++#endif
+ 
+ at_daemon_ctx_t g_daemon_ctx;
+ 
+-// Policy for open method
+-enum {
+-    OPEN_AT_PORT,
+-    OPEN_BAUDRATE,
+-    OPEN_DATABITS,
+-    OPEN_PARITY,
+-    OPEN_STOPBITS,
+-    OPEN_TIMEOUT,
+-    __OPEN_MAX
++enum { LEASE_PORT, LEASE_OWNER, LEASE_TTL, LEASE_BAUD, __LEASE_MAX };
++static const struct blobmsg_policy lease_policy[] = {
++    [LEASE_PORT] = { .name = "at_port", .type = BLOBMSG_TYPE_STRING },
++    [LEASE_OWNER] = { .name = "owner", .type = BLOBMSG_TYPE_STRING },
++    [LEASE_TTL] = { .name = "ttl", .type = BLOBMSG_TYPE_INT32 },
++    [LEASE_BAUD] = { .name = "baudrate", .type = BLOBMSG_TYPE_INT32 },
+ };
+-
+-static const struct blobmsg_policy open_policy[] = {
+-    [OPEN_AT_PORT] = { .name = JSON_AT_PORT, .type = BLOBMSG_TYPE_STRING },
+-    [OPEN_BAUDRATE] = { .name = JSON_BAUDRATE, .type = BLOBMSG_TYPE_INT32 },
+-    [OPEN_DATABITS] = { .name = JSON_DATABITS, .type = BLOBMSG_TYPE_INT32 },
+-    [OPEN_PARITY] = { .name = JSON_PARITY, .type = BLOBMSG_TYPE_INT32 },
+-    [OPEN_STOPBITS] = { .name = JSON_STOPBITS, .type = BLOBMSG_TYPE_INT32 },
+-    [OPEN_TIMEOUT] = { .name = JSON_TIMEOUT, .type = BLOBMSG_TYPE_INT32 },
+-};
+-
+-// Policy for sendat method
+-enum {
+-    SENDAT_AT_PORT,
+-    SENDAT_TIMEOUT,
+-    SENDAT_END_FLAG,
+-    SENDAT_AT_CMD,
+-    SENDAT_RAW_AT_CONTENT,
+-    SENDAT_SENDONLY,
+-    __SENDAT_MAX
+-};
+-
++enum { SENDAT_AT_PORT, SENDAT_OWNER, SENDAT_TIMEOUT, SENDAT_END_FLAG,
++       SENDAT_AT_CMD, SENDAT_RAW_AT_CONTENT, SENDAT_SENDONLY, __SENDAT_MAX };
+ static const struct blobmsg_policy sendat_policy[] = {
+-    [SENDAT_AT_PORT] = { .name = JSON_AT_PORT, .type = BLOBMSG_TYPE_STRING },
+-    [SENDAT_TIMEOUT] = { .name = JSON_TIMEOUT, .type = BLOBMSG_TYPE_INT32 },
++    [SENDAT_AT_PORT] = { .name = "at_port", .type = BLOBMSG_TYPE_STRING },
++    [SENDAT_OWNER] = { .name = "owner", .type = BLOBMSG_TYPE_STRING },
++    [SENDAT_TIMEOUT] = { .name = "timeout", .type = BLOBMSG_TYPE_INT32 },
+     [SENDAT_END_FLAG] = { .name = "end_flag", .type = BLOBMSG_TYPE_STRING },
+     [SENDAT_AT_CMD] = { .name = "at_cmd", .type = BLOBMSG_TYPE_STRING },
+     [SENDAT_RAW_AT_CONTENT] = { .name = "raw_at_content", .type = BLOBMSG_TYPE_STRING },
+     [SENDAT_SENDONLY] = { .name = "sendonly", .type = BLOBMSG_TYPE_BOOL },
+ };
+-
+-// Policy for close method
+-enum {
+-    CLOSE_AT_PORT,
+-    __CLOSE_MAX
+-};
+-
+-static const struct blobmsg_policy close_policy[] = {
+-    [CLOSE_AT_PORT] = { .name = JSON_AT_PORT, .type = BLOBMSG_TYPE_STRING },
+-};
+-
+-// Ubus method: open
+-static int ubus_open_method(struct ubus_context *ctx, struct ubus_object *obj,
+-                           struct ubus_request_data *req, const char *method,
+-                           struct blob_attr *msg) {
+-    struct blob_attr *tb[__OPEN_MAX];
+-    const char *at_port;
+-    int baudrate = 115200;  // Default values from const.h
+-    int databits = DEFAULT_DATABITS;
+-    int parity = DEFAULT_PARITY;
+-    int stopbits = DEFAULT_STOPBITS;
+-    int timeout = DEFAULT_TIMEOUT;
+-    
+-    blobmsg_parse(open_policy, __OPEN_MAX, tb, blob_data(msg), blob_len(msg));
+-    
+-    if (!tb[OPEN_AT_PORT]) {
+-        return UBUS_STATUS_INVALID_ARGUMENT;
+-    }
+-    
+-    at_port = blobmsg_get_string(tb[OPEN_AT_PORT]);
+-    
+-    if (tb[OPEN_BAUDRATE])
+-        baudrate = blobmsg_get_u32(tb[OPEN_BAUDRATE]);
+-    if (tb[OPEN_DATABITS])
+-        databits = blobmsg_get_u32(tb[OPEN_DATABITS]);
+-    if (tb[OPEN_PARITY])
+-        parity = blobmsg_get_u32(tb[OPEN_PARITY]);
+-    if (tb[OPEN_STOPBITS])
+-        stopbits = blobmsg_get_u32(tb[OPEN_STOPBITS]);
+-    if (tb[OPEN_TIMEOUT])
+-        timeout = blobmsg_get_u32(tb[OPEN_TIMEOUT]);
+-    
+-    // Find existing port instance
+-    at_port_instance_t *port = find_port_instance(at_port);
+-    int is_new_port = (port == NULL);
+-    
+-    if (!port) {
+-        // Check if port file exists before creating instance
+-        if (access(at_port, F_OK) != 0) {
+-            struct blob_buf b = {};
+-            blob_buf_init(&b, 0);
+-            blobmsg_add_string(&b, "status", "error");
+-            blobmsg_add_string(&b, "message", "Port file does not exist");
+-            ubus_send_reply(ctx, req, b.head);
+-            blob_buf_free(&b);
+-            return UBUS_STATUS_OK;
+-        }
+-        
+-        port = create_port_instance(at_port);
+-        if (!port) {
+-            return UBUS_STATUS_NO_DATA;
+-        }
+-    }
+-    
+-    // Open the port
+-    int result = open_at_port(port, baudrate, databits, parity, stopbits);
+-    
+-    struct blob_buf b = {};
+-    blob_buf_init(&b, 0);
+-    
+-    if (result == 0) {
+-        blobmsg_add_string(&b, "status", "success");
+-        blobmsg_add_string(&b, "port", at_port);
+-        blobmsg_add_u32(&b, "baudrate", baudrate);
+-        blobmsg_add_u32(&b, "databits", databits);
+-        blobmsg_add_u32(&b, "parity", parity);
+-        blobmsg_add_u32(&b, "stopbits", stopbits);
+-        ubus_send_reply(ctx, req, b.head);
+-    } else {
+-        blobmsg_add_string(&b, "status", "error");
+-        blobmsg_add_string(&b, "message", "Failed to open port");
+-        ubus_send_reply(ctx, req, b.head);
+-        
+-        // If this was a new port instance and opening failed, remove it from the list
+-        if (is_new_port) {
+-            destroy_port_instance(port);
+-        }
+-    }
+-    
+-    blob_buf_free(&b);
+-    return UBUS_STATUS_OK;
++static int status_reply(struct ubus_context *ctx, struct ubus_request_data *req,
++                        const char *status, const char *message, const char *port) {
++    struct blob_buf b = {0}; blob_buf_init(&b, 0);
++    blobmsg_add_string(&b, "status", status);
++    if (message) blobmsg_add_string(&b, "message", message);
++    if (port) blobmsg_add_string(&b, "port", port);
++    ubus_send_reply(ctx, req, b.head); blob_buf_free(&b); return UBUS_STATUS_OK;
++}
++static int ubus_lease_method(struct ubus_context *ctx, struct ubus_object *obj,
++                            struct ubus_request_data *req, const char *method,
++                            struct blob_attr *msg) {
++    (void)obj; struct blob_attr *tb[__LEASE_MAX];
++    blobmsg_parse(lease_policy, __LEASE_MAX, tb, blob_data(msg), blob_len(msg));
++    if (!tb[LEASE_PORT] || !tb[LEASE_OWNER]) return UBUS_STATUS_INVALID_ARGUMENT;
++    const char *path = blobmsg_get_string(tb[LEASE_PORT]);
++    const char *owner = blobmsg_get_string(tb[LEASE_OWNER]);
++    int acquire = !strcmp(method, "acquire");
++    int ttl = tb[LEASE_TTL] ? blobmsg_get_u32(tb[LEASE_TTL]) : 120;
++    int baud = tb[LEASE_BAUD] ? blobmsg_get_u32(tb[LEASE_BAUD]) : 115200;
++    at_port_instance_t *port = acquire ? create_port_instance(path) : find_port_instance(path);
++    int result = acquire ? at_session_acquire(port, owner, ttl, baud) : at_session_release(port, owner);
++    return status_reply(ctx, req, result == 0 ? "success" : result == 1 ? "busy" : "error",
++        result == 0 ? NULL : result == 1 ? "Port is owned by another operation" :
++        "Invalid lease/port or quarantined transport; recover modem and restart daemon after timeout",
++        port ? port->port_path : NULL);
++}
++static int ubus_unmanaged_method(struct ubus_context *ctx, struct ubus_object *obj,
++                                struct ubus_request_data *req, const char *method,
++                                struct blob_attr *msg) {
++    (void)obj; (void)method; (void)msg;
++    return status_reply(ctx, req, "error", "Use acquire/sendat/release; unmanaged open and close are disabled", NULL);
+ }
+-
+ static int ubus_sendat_method(struct ubus_context *ctx, struct ubus_object *obj,
+                              struct ubus_request_data *req, const char *method,
+                              struct blob_attr *msg) {
+-    struct blob_attr *tb[__SENDAT_MAX];
+-    const char *at_port, *at_cmd = NULL, *raw_at_content = NULL, *end_flag = NULL;
+-    int timeout = DEFAULT_TIMEOUT;
+-    int is_raw = 0;
+-    int sendonly = 0;
+-    
++    (void)obj; (void)method; struct blob_attr *tb[__SENDAT_MAX];
+     blobmsg_parse(sendat_policy, __SENDAT_MAX, tb, blob_data(msg), blob_len(msg));
+-    
+-    if (!tb[SENDAT_AT_PORT]) {
+-        return UBUS_STATUS_INVALID_ARGUMENT;
+-    }
+-    
+-    at_port = blobmsg_get_string(tb[SENDAT_AT_PORT]);
+-    
+-    if (tb[SENDAT_TIMEOUT])
+-        timeout = blobmsg_get_u32(tb[SENDAT_TIMEOUT]);
+-    if (tb[SENDAT_END_FLAG])
+-        end_flag = blobmsg_get_string(tb[SENDAT_END_FLAG]);
+-    if (tb[SENDAT_SENDONLY])
+-        sendonly = blobmsg_get_bool(tb[SENDAT_SENDONLY]);
+-    
+-    if (tb[SENDAT_AT_CMD]) {
+-        at_cmd = blobmsg_get_string(tb[SENDAT_AT_CMD]);
+-        is_raw = 0;
+-    } else if (tb[SENDAT_RAW_AT_CONTENT]) {
+-        raw_at_content = blobmsg_get_string(tb[SENDAT_RAW_AT_CONTENT]);
+-        is_raw = 1;
+-    } else {
+-        return UBUS_STATUS_INVALID_ARGUMENT;
+-    }
+-    
+-    // Find or create port instance
+-    at_port_instance_t *port = find_port_instance(at_port);
+-    if (!port) {
+-        port = create_port_instance(at_port);
+-        if (!port) {
+-            return UBUS_STATUS_NO_DATA;
+-        }
+-    }
+-    
+-    const char *cmd = is_raw ? raw_at_content : at_cmd;
+-    int result;
++    if (!tb[SENDAT_AT_PORT] || !tb[SENDAT_OWNER] ||
++        (!!tb[SENDAT_AT_CMD] == !!tb[SENDAT_RAW_AT_CONTENT])) return UBUS_STATUS_INVALID_ARGUMENT;
++    if (tb[SENDAT_SENDONLY] && blobmsg_get_bool(tb[SENDAT_SENDONLY]))
++        return status_reply(ctx, req, "error", "sendonly is disabled; a final response is required", NULL);
++    const char *path = blobmsg_get_string(tb[SENDAT_AT_PORT]);
++    int raw = !!tb[SENDAT_RAW_AT_CONTENT];
++    const char *cmd = blobmsg_get_string(tb[raw ? SENDAT_RAW_AT_CONTENT : SENDAT_AT_CMD]);
++    const char *end = tb[SENDAT_END_FLAG] ? blobmsg_get_string(tb[SENDAT_END_FLAG]) : NULL;
++    int timeout = tb[SENDAT_TIMEOUT] ? blobmsg_get_u32(tb[SENDAT_TIMEOUT]) : DEFAULT_TIMEOUT;
++    at_port_instance_t *port = find_port_instance(path);
+     at_response_t response;
+-    
+-    if (sendonly) {
+-        // Send only without waiting for response
+-        result = send_at_command_only(port, cmd, is_raw);
+-    } else {
+-        // Send AT command with response
+-        result = send_at_command_with_response(port, cmd, timeout, end_flag, is_raw, &response);
+-    }
+-    
+-    struct blob_buf b = {};
+-    blob_buf_init(&b, 0);
+-    
+-    blobmsg_add_string(&b, "port", at_port);
+-    blobmsg_add_string(&b, "command", cmd);
+-    blobmsg_add_u32(&b, "is_raw", is_raw);
+-    blobmsg_add_u32(&b, "sendonly", sendonly);
+-    
+-    if (sendonly) {
+-        // For send-only mode
+-        if (result == 0) {
+-            blobmsg_add_string(&b, "status", "success");
+-            blobmsg_add_string(&b, "message", "Command sent successfully");
+-        } else {
+-            blobmsg_add_string(&b, "status", "error");
+-            blobmsg_add_string(&b, "message", "Failed to send AT command");
+-        }
+-    } else {
+-        // For normal mode with response
+-        blobmsg_add_u32(&b, "timeout", timeout);
+-        blobmsg_add_string(&b, "end_flag", end_flag ? end_flag : "default");
+-        
+-        // Add debug info about end flags used
+-        void *end_flags_array = blobmsg_open_array(&b, "end_flags_used");
+-        for (int i = 0; i < port->num_end_flags; i++) {
+-            blobmsg_add_string(&b, NULL, port->expected_end_flags[i]);
+-        }
+-        blobmsg_close_array(&b, end_flags_array);
+-        
+-        if (result == 0) {
+-            blobmsg_add_string(&b, "status", "success");
+-            blobmsg_add_string(&b, "response", response.response);
+-            blobmsg_add_u32(&b, "response_length", response.response_len);
+-            blobmsg_add_string(&b, "end_flag_matched", response.end_flag_matched);
+-            blobmsg_add_u32(&b, "response_time_ms", response.response_time_ms);
+-        } else if (result == -1) {
+-            blobmsg_add_string(&b, "status", "timeout");
+-            blobmsg_add_string(&b, "message", "AT command timed out");
+-            blobmsg_add_u32(&b, "response_time_ms", response.response_time_ms);
+-            if (strlen(response.response) > 0) {
+-                blobmsg_add_string(&b, "partial_response", response.response);
+-            }
+-        } else {
+-            blobmsg_add_string(&b, "status", "error");
+-            blobmsg_add_string(&b, "message", "Failed to send AT command");
+-            blobmsg_add_u32(&b, "response_time_ms", response.response_time_ms);
+-        }
+-    }
+-    
+-    ubus_send_reply(ctx, req, b.head);
+-    blob_buf_free(&b);
+-    return UBUS_STATUS_OK;
++    int result = at_session_send(port, blobmsg_get_string(tb[SENDAT_OWNER]), cmd,
++                                 timeout, end, raw, &response);
++    struct blob_buf b = {0}; blob_buf_init(&b, 0);
++    blobmsg_add_string(&b, "status", result == 0 ? "success" : result == -1 ? "timeout" : "error");
++    if (port) blobmsg_add_string(&b, "port", port->port_path);
++    blobmsg_add_string(&b, "response", response.response);
++    blobmsg_add_u32(&b, "response_length", response.response_len);
++    blobmsg_add_string(&b, "end_flag_matched", response.end_flag_matched);
++    blobmsg_add_u32(&b, "response_time_ms", response.response_time_ms);
++    if (result) blobmsg_add_string(&b, "message", result == -1 ?
++        "AT command timed out; port quarantined, recover modem and restart daemon" :
++        "Command rejected, modem error, invalid lease or quarantined transport");
++    ubus_send_reply(ctx, req, b.head); blob_buf_free(&b); return UBUS_STATUS_OK;
+ }
+ 
+ // Ubus method: list
+ static int ubus_list_method(struct ubus_context *ctx, struct ubus_object *obj,
+                            struct ubus_request_data *req, const char *method,
+                            struct blob_attr *msg) {
++    (void)obj; (void)method; (void)msg;
+     struct blob_buf b = {};
+     blob_buf_init(&b, 0);
+     
+@@ -277,6 +120,9 @@ static int ubus_list_method(struct ubus_context *ctx, struct ubus_object *obj,
+         stopbits = current->configured_stopbits;
+         pthread_mutex_unlock(&current->state_mutex);
+         blobmsg_add_u32(&b, "is_open", is_open);
++        pthread_mutex_lock(&current->response_mutex);
++        blobmsg_add_u8(&b, "quarantined", current->quarantined);
++        pthread_mutex_unlock(&current->response_mutex);
+         if (is_open) {
+             blobmsg_add_u32(&b, "fd", fd);
+             if (baudrate > 0) {
+@@ -313,48 +159,14 @@ static int ubus_list_method(struct ubus_context *ctx, struct ubus_object *obj,
+     return UBUS_STATUS_OK;
+ }
+ 
+-// Ubus method: close
+-static int ubus_close_method(struct ubus_context *ctx, struct ubus_object *obj,
+-                            struct ubus_request_data *req, const char *method,
+-                            struct blob_attr *msg) {
+-    struct blob_attr *tb[__CLOSE_MAX];
+-    const char *at_port;
+-    
+-    blobmsg_parse(close_policy, __CLOSE_MAX, tb, blob_data(msg), blob_len(msg));
+-    
+-    if (!tb[CLOSE_AT_PORT]) {
+-        return UBUS_STATUS_INVALID_ARGUMENT;
+-    }
+-    
+-    at_port = blobmsg_get_string(tb[CLOSE_AT_PORT]);
+-    
+-    at_port_instance_t *port = find_port_instance(at_port);
+-    
+-    struct blob_buf b = {};
+-    blob_buf_init(&b, 0);
+-    
+-    if (port) {
+-        close_at_port(port);
+-        destroy_port_instance(port);
+-        blobmsg_add_string(&b, "status", "success");
+-        blobmsg_add_string(&b, "port", at_port);
+-        blobmsg_add_string(&b, "message", "Port closed and removed");
+-    } else {
+-        blobmsg_add_string(&b, "status", "error");
+-        blobmsg_add_string(&b, "message", "Port not found");
+-    }
+-    
+-    ubus_send_reply(ctx, req, b.head);
+-    blob_buf_free(&b);
+-    return UBUS_STATUS_OK;
+-}
+-
+ // Ubus methods table
+ static const struct ubus_method at_daemon_methods[] = {
+-    UBUS_METHOD("open", ubus_open_method, open_policy),
++    UBUS_METHOD("acquire", ubus_lease_method, lease_policy),
++    UBUS_METHOD("release", ubus_lease_method, lease_policy),
++    UBUS_METHOD("open", ubus_unmanaged_method, lease_policy),
+     UBUS_METHOD("sendat", ubus_sendat_method, sendat_policy),
+     UBUS_METHOD_NOARG("list", ubus_list_method),
+-    UBUS_METHOD("close", ubus_close_method, close_policy),
++    UBUS_METHOD("close", ubus_unmanaged_method, lease_policy),
+ };
+ 
+ static struct ubus_object_type at_daemon_object_type =
+@@ -374,7 +186,7 @@ static void server_main(void) {
+         return;
+     }
+     
+-    g_daemon_ctx.ctx = ubus_connect(NULL);
++    g_daemon_ctx.ctx = ubus_connect(getenv("UBUS_SOCKET"));
+     if (!g_daemon_ctx.ctx) {
+         fprintf(stderr, "Failed to connect to ubus\n");
+         return;
+@@ -403,7 +215,7 @@ static void server_main(void) {
+     uloop_done();
+ }
+ 
+-int main(int argc, char **argv) {
++int main(void) {
+     struct timespec started;
+     // Initialize global context
+     memset(&g_daemon_ctx, 0, sizeof(g_daemon_ctx));
+@@ -421,15 +233,12 @@ int main(int argc, char **argv) {
+     server_main();
+     
+     // Cleanup
+-    pthread_mutex_lock(&g_daemon_ctx.ports_mutex);
+     at_port_instance_t *current = g_daemon_ctx.ports;
+     while (current) {
+         at_port_instance_t *next = current->next;
+         destroy_port_instance(current);
+         current = next;
+     }
+-    pthread_mutex_unlock(&g_daemon_ctx.ports_mutex);
+-    
+     pthread_mutex_destroy(&g_daemon_ctx.ports_mutex);
+     at_line_events_cleanup(&g_daemon_ctx.line_events);
+     
+diff --git a/application/ubus_at_daemon/src/port_manager.c b/application/ubus_at_daemon/src/port_manager.c
+index 2fc56e0..de891a3 100644
+--- a/application/ubus_at_daemon/src/port_manager.c
++++ b/application/ubus_at_daemon/src/port_manager.c
+@@ -1,30 +1,63 @@
+ #include "ubus_at_daemon.h"
++#include <sys/stat.h>
++#include <sys/ioctl.h>
++#include <sys/socket.h>
++#include <arpa/inet.h>
++#include <poll.h>
++#include <limits.h>
+ 
+ extern at_daemon_ctx_t g_daemon_ctx;
+ 
+-at_port_instance_t *find_port_instance(const char *port_path) {
+-    pthread_mutex_lock(&g_daemon_ctx.ports_mutex);
+-    
+-    at_port_instance_t *current = g_daemon_ctx.ports;
+-    while (current) {
+-        if (strcmp(current->port_path, port_path) == 0) {
+-            pthread_mutex_unlock(&g_daemon_ctx.ports_mutex);
+-            return current;
+-        }
+-        current = current->next;
++static int tcp_address(const char *path, struct sockaddr_in *addr) {
++    char ip[INET_ADDRSTRLEN], tail; unsigned int number;
++    memset(addr, 0, sizeof(*addr));
++    if (sscanf(path, "tcp://%15[0-9.]:%u%c", ip, &number, &tail) != 2 ||
++        !number || number > 65535 || inet_pton(AF_INET, ip, &addr->sin_addr) != 1)
++        return -1;
++    addr->sin_family = AF_INET; addr->sin_port = htons(number); return 0;
++}
++static int canonical_path(const char *input, char *path, dev_t *device) {
++    if (!input) return -1;
++    if (!strncmp(input, "tcp://", 6)) {
++        struct sockaddr_in addr; char ip[INET_ADDRSTRLEN];
++        if (tcp_address(input, &addr)) return -1;
++        inet_ntop(AF_INET, &addr.sin_addr, ip, sizeof(ip));
++        snprintf(path, MAX_PORT_PATH_SIZE, "tcp://%s:%u", ip, ntohs(addr.sin_port));
++        *device = 0; return 0;
+     }
+-    
+-    pthread_mutex_unlock(&g_daemon_ctx.ports_mutex);
++    char resolved[PATH_MAX]; struct stat st;
++    if (!realpath(input, resolved) || strlen(resolved) >= MAX_PORT_PATH_SIZE ||
++        stat(resolved, &st) || !S_ISCHR(st.st_mode)) return -1;
++    strcpy(path, resolved); *device = st.st_rdev; return 0;
++}
++static at_port_instance_t *find_locked(const char *path, dev_t device) {
++    for (at_port_instance_t *p = g_daemon_ctx.ports; p; p = p->next)
++        if (!strcmp(p->port_path, path) ||
++            (device && !p->is_tcp && p->device_id == device)) return p;
+     return NULL;
+ }
+-
+-at_port_instance_t *create_port_instance(const char *port_path) {
+-    at_port_instance_t *port = calloc(1, sizeof(at_port_instance_t));
+-    if (!port) {
+-        return NULL;
++at_port_instance_t *find_port_instance(const char *input) {
++    char path[MAX_PORT_PATH_SIZE]; dev_t device;
++    if (canonical_path(input, path, &device)) return NULL;
++    pthread_mutex_lock(&g_daemon_ctx.ports_mutex);
++    at_port_instance_t *port = find_locked(path, device);
++    pthread_mutex_unlock(&g_daemon_ctx.ports_mutex);
++    return port;
++}
++at_port_instance_t *create_port_instance(const char *input) {
++    char path[MAX_PORT_PATH_SIZE]; dev_t device;
++    if (canonical_path(input, path, &device)) return NULL;
++    pthread_mutex_lock(&g_daemon_ctx.ports_mutex);
++    at_port_instance_t *port = find_locked(path, device);
++    if (port) { pthread_mutex_unlock(&g_daemon_ctx.ports_mutex); return port; }
++    size_t count = 0;
++    for (port = g_daemon_ctx.ports; port; port = port->next) count++;
++    if (count >= MAX_AT_PORTS || !(port = calloc(1, sizeof(*port)))) {
++        pthread_mutex_unlock(&g_daemon_ctx.ports_mutex); return NULL;
+     }
+-    
+-    strncpy(port->port_path, port_path, MAX_PORT_PATH_SIZE - 1);
++    strcpy(port->port_path, path); port->device_id = device;
++    port->is_tcp = !strncmp(path, "tcp://", 6);
++    pthread_mutex_init(&port->session_mutex, NULL);
+     port->fd = -1;
+     port->is_open = 0;
+     port->should_stop = 0;
+@@ -63,7 +96,6 @@ at_port_instance_t *create_port_instance(const char *port_path) {
+     pthread_cond_init(&port->response_cond, NULL);
+     
+     // Add to global ports list
+-    pthread_mutex_lock(&g_daemon_ctx.ports_mutex);
+     port->next = g_daemon_ctx.ports;
+     g_daemon_ctx.ports = port;
+     pthread_mutex_unlock(&g_daemon_ctx.ports_mutex);
+@@ -91,6 +123,7 @@ void destroy_port_instance(at_port_instance_t *port) {
+     clear_event_callbacks(port);
+     
+     // Destroy mutexes
++    pthread_mutex_destroy(&port->session_mutex);
+     pthread_mutex_destroy(&port->queue_mutex);
+     pthread_mutex_destroy(&port->write_mutex);
+     pthread_mutex_destroy(&port->response_mutex);
+@@ -146,8 +179,12 @@ static int stop_reader(at_port_instance_t *port)
+ static void mark_port_closed(at_port_instance_t *port)
+ {
+     pthread_mutex_lock(&port->state_mutex);
+-    if (port->fd >= 0)
++    if (port->fd >= 0) {
++#ifdef TIOCNXCL
++        if (!port->is_tcp) ioctl(port->fd, TIOCNXCL);
++#endif
+         close(port->fd);
++    }
+     port->fd = -1;
+     port->is_open = 0;
+     pthread_mutex_unlock(&port->state_mutex);
+@@ -177,6 +214,26 @@ int open_at_port(at_port_instance_t *port, int baudrate, int databits, int parit
+     }
+     mark_port_closed(port);
+ 
++    if (port->is_tcp) {
++        struct sockaddr_in addr;
++        if (tcp_address(port->port_path, &addr)) goto open_failed;
++        fd = socket(AF_INET, SOCK_STREAM, 0);
++        if (fd < 0) goto open_failed;
++        fcntl(fd, F_SETFD, FD_CLOEXEC);
++        fcntl(fd, F_SETFL, O_NONBLOCK);
++        int result = connect(fd, (struct sockaddr *)&addr, sizeof(addr));
++        if (result && errno == EINPROGRESS) {
++            struct pollfd event = { .fd = fd, .events = POLLOUT };
++            int error = 0; socklen_t length = sizeof(error);
++            result = poll(&event, 1, 3000) > 0 &&
++                getsockopt(fd, SOL_SOCKET, SO_ERROR, &error, &length) == 0 && !error ? 0 : -1;
++        }
++        if (result) { close(fd); goto open_failed; }
++#ifdef SO_NOSIGPIPE
++        int on = 1; setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof(on));
++#endif
++        goto start_reader;
++    }
+     // Check if file exists before trying to open
+     if (access(port->port_path, F_OK) != 0) {
+         fprintf(stderr, "Port file %s does not exist\n", port->port_path);
+@@ -191,9 +248,18 @@ int open_at_port(at_port_instance_t *port, int baudrate, int databits, int parit
+         return -1;
+     }
+     
++    fcntl(fd, F_SETFD, FD_CLOEXEC);
++    struct flock lock = { .l_type = F_WRLCK, .l_whence = SEEK_SET };
++    if (fcntl(fd, F_SETLK, &lock) < 0 && errno != EINVAL && errno != ENOTSUP) {
++        close(fd); goto open_failed;
++    }
++#ifdef TIOCEXCL
++    if (ioctl(fd, TIOCEXCL) < 0) { close(fd); goto open_failed; }
++#endif
+     // Configure terminal settings
+     struct termios options;
+-    tcgetattr(fd, &options);
++    if (tcgetattr(fd, &options)) { close(fd); goto open_failed; }
++    cfmakeraw(&options);
+     
+     // Set baud rate
+     speed_t speed;
+@@ -247,12 +313,13 @@ int open_at_port(at_port_instance_t *port, int baudrate, int databits, int parit
+     options.c_cc[VMIN] = 0;
+     options.c_cc[VTIME] = 1;
+     
+-    tcsetattr(fd, TCSANOW, &options);
++    if (tcsetattr(fd, TCSANOW, &options)) { close(fd); goto open_failed; }
++    port->termios_config = options;
++start_reader:
+     at_port_advance_restart_epoch(port);
+     port->buffer_pos = 0;
+ 
+     pthread_mutex_lock(&port->state_mutex);
+-    port->termios_config = options;
+     port->configured_baudrate = baudrate;
+     port->configured_databits = databits;
+     port->configured_parity = parity;
+@@ -277,6 +344,9 @@ int open_at_port(at_port_instance_t *port, int baudrate, int databits, int parit
+     pthread_mutex_unlock(&port->lifecycle_mutex);
+     
+     return 0;
++open_failed:
++    pthread_mutex_unlock(&port->lifecycle_mutex);
++    return -1;
+ }
+ 
+ void close_at_port(at_port_instance_t *port) {
+@@ -321,7 +391,7 @@ void check_and_reconnect_port(at_port_instance_t *port) {
+ 
+     if (!is_open) {
+         // Port is marked as closed, check if file exists and try to reopen
+-        if (access(port->port_path, F_OK) == 0) {
++        if (port->is_tcp || access(port->port_path, F_OK) == 0) {
+             // File exists, try to reopen
+             fprintf(stdout, "Port %s exists but is closed, attempting to reopen...\n", port->port_path);
+             
+@@ -333,7 +403,7 @@ void check_and_reconnect_port(at_port_instance_t *port) {
+         }
+     } else {
+         // Port is marked as open, verify it's still accessible
+-        if (access(port->port_path, F_OK) != 0) {
++        if (!port->is_tcp && access(port->port_path, F_OK) != 0) {
+             // File no longer exists
+             fprintf(stderr, "Port %s no longer exists, marking as closed\n", port->port_path);
+             close_at_port(port);
+@@ -360,7 +430,13 @@ void *port_monitor_thread_func(void *arg) {
+         
+         at_port_instance_t *current = g_daemon_ctx.ports;
+         while (current) {
+-            check_and_reconnect_port(current);
++            if (pthread_mutex_trylock(&current->session_mutex) == 0) {
++                pthread_mutex_lock(&current->response_mutex);
++                int skip = current->quarantined || current->lease_owner[0];
++                pthread_mutex_unlock(&current->response_mutex);
++                if (!skip) check_and_reconnect_port(current);
++                pthread_mutex_unlock(&current->session_mutex);
++            }
+             current = current->next;
+         }
+         
+diff --git a/application/ubus_at_daemon/src/session.c b/application/ubus_at_daemon/src/session.c
+new file mode 100644
+index 0000000..5a54a1f
+--- /dev/null
++++ b/application/ubus_at_daemon/src/session.c
+@@ -0,0 +1,137 @@
++#include "ubus_at_daemon.h"
++#include <ctype.h>
++#include <strings.h>
++
++static uint64_t monotonic_ms(void) {
++    struct timespec now; clock_gettime(CLOCK_MONOTONIC, &now);
++    return (uint64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000;
++}
++static int valid_owner(const char *owner) {
++    if (!owner || strlen(owner) < 32 || strlen(owner) > 64) return 0;
++    for (const unsigned char *p = (const unsigned char *)owner; *p; ++p)
++        if (!isxdigit(*p)) return 0;
++    return 1;
++}
++static int is_quarantined(at_port_instance_t *port) {
++    pthread_mutex_lock(&port->response_mutex);
++    int result = port->quarantined;
++    pthread_mutex_unlock(&port->response_mutex); return result;
++}
++static void quarantine(at_port_instance_t *port) {
++    pthread_mutex_lock(&port->response_mutex);
++    port->quarantined = 1;
++    pthread_mutex_unlock(&port->response_mutex);
++}
++/* No finite delay proves that a timed-out modem has stopped replying. Keep the
++ * reader draining, reject new work, and require device recovery + daemon restart.
++ * A known prompt may be cancelled with ESC and a confirmed final response. */
++static int end_session(at_port_instance_t *port) {
++    int result = 0;
++    pthread_mutex_lock(&port->response_mutex);
++    int prompt = port->prompt_pending;
++    pthread_mutex_unlock(&port->response_mutex);
++    pthread_mutex_lock(&port->state_mutex);
++    int opened = port->is_open;
++    pthread_mutex_unlock(&port->state_mutex);
++    if (prompt && !opened) quarantine(port);
++    if (prompt && !is_quarantined(port)) {
++        at_response_t reply;
++        result = send_at_command_with_response(port, "1b", 2, NULL, 1, &reply);
++        if (result == -1 || !reply.end_flag_matched[0]) quarantine(port);
++        pthread_mutex_lock(&port->response_mutex);
++        port->prompt_pending = 0;
++        pthread_mutex_unlock(&port->response_mutex);
++    }
++    port->lease_owner[0] = 0; port->lease_deadline_ms = 0;
++    return is_quarantined(port) ? -2 : 0;
++}
++static void expire_session(at_port_instance_t *port) {
++    if (port->lease_owner[0] && monotonic_ms() >= port->lease_deadline_ms)
++        end_session(port);
++}
++int at_session_acquire(at_port_instance_t *port, const char *owner, int ttl, int baudrate) {
++    if (!port || !valid_owner(owner) || ttl < 1 || ttl > 120 || baudrate != 115200) return -2;
++    pthread_mutex_lock(&port->session_mutex);
++    expire_session(port);
++    int result = 0;
++    if (is_quarantined(port)) result = -2;
++    else if (port->lease_owner[0] && strcmp(port->lease_owner, owner)) result = 1;
++    else {
++        pthread_mutex_lock(&port->state_mutex);
++        int disconnected_owner = port->lease_owner[0] && !port->is_open;
++        pthread_mutex_unlock(&port->state_mutex);
++        if (disconnected_owner) quarantine(port);
++        if (disconnected_owner || open_at_port(port, baudrate, 8, 0, 1)) result = -2;
++    }
++    if (result == 0) {
++        strcpy(port->lease_owner, owner);
++        port->lease_deadline_ms = monotonic_ms() + (uint64_t)ttl * 1000;
++    }
++    pthread_mutex_unlock(&port->session_mutex); return result;
++}
++int at_session_release(at_port_instance_t *port, const char *owner) {
++    if (!port || !valid_owner(owner)) return -2;
++    pthread_mutex_lock(&port->session_mutex);
++    expire_session(port);
++    int result = strcmp(port->lease_owner, owner) ? -2 : end_session(port);
++    pthread_mutex_unlock(&port->session_mutex); return result;
++}
++int at_session_send(at_port_instance_t *port, const char *owner, const char *cmd,
++                    int timeout, const char *end_flag, int raw, at_response_t *response) {
++    if (response) { memset(response, 0, sizeof(*response)); response->status = -2; }
++    if (!port || !response || !valid_owner(owner) || !cmd || !*cmd ||
++        timeout < 1 || timeout > 60 || strlen(cmd) > 8192 ||
++        (end_flag && strlen(end_flag) > 255)) return -2;
++    /* Only a modem terminal or a prompt may finish a transaction. An arbitrary
++     * intermediate prefix (+CMGS, +CSQ...) would leave its final OK unread. */
++    if (end_flag && *end_flag && strcmp(end_flag, ">") && strcmp(end_flag, "OK") &&
++        strcmp(end_flag, "OK,ERROR,+CME ERROR:,+CMS ERROR:")) return -2;
++    if (raw) {
++        if (strlen(cmd) % 2) return -2;
++        for (const unsigned char *p = (const unsigned char *)cmd; *p; ++p)
++            if (!isxdigit(*p)) return -2;
++    } else if (strchr(cmd, '\r') || strchr(cmd, '\n') || strchr(cmd, '\x1a') || strchr(cmd, '\x1b')) return -2;
++    pthread_mutex_lock(&port->session_mutex);
++    expire_session(port);
++    int result = -2;
++    pthread_mutex_lock(&port->response_mutex);
++    int prompt = port->prompt_pending;
++    pthread_mutex_unlock(&port->response_mutex);
++    if (is_quarantined(port) || strcmp(port->lease_owner, owner) || (prompt && !raw)) goto done;
++    if (raw) {
++        unsigned char *data = (unsigned char *)hex_to_string(cmd);
++        size_t length = strlen(cmd) / 2;
++        int framed = data != NULL;
++        if (framed && prompt) {
++            framed = (length == 1 && data[0] == 0x1b) || data[length - 1] == 0x1a;
++            for (size_t i = 0; framed && i + 1 < length; i++)
++                if (data[i] == 0x1a || data[i] == 0x1b) framed = 0;
++        } else if (framed) {
++            /* Raw AT is one command, never a pipeline with leftover terminals. */
++            size_t body = length;
++            if (body && data[body - 1] == '\n') body--;
++            if (!body || data[body - 1] != '\r') framed = 0;
++            else body--;
++            if (body < 2 || strncasecmp((char *)data, "AT", 2)) framed = 0;
++            for (size_t i = 0; framed && i < body; i++)
++                if (data[i] < 32 || data[i] > 126) framed = 0;
++        }
++        free(data);
++        if (!framed) goto done;
++    }
++    /* A disconnected lease cannot silently continue its SMS on a new stream. */
++    pthread_mutex_lock(&port->state_mutex);
++    int opened = port->is_open;
++    pthread_mutex_unlock(&port->state_mutex);
++    if (!opened) { quarantine(port); goto done; }
++    /* Renew for the operation; timeout cannot outlive its owning lease. */
++    port->lease_deadline_ms = monotonic_ms() + 120000;
++    result = send_at_command_with_response(port, cmd, timeout,
++        end_flag && !strcmp(end_flag, ">") ? ">,ERROR,+CME ERROR:,+CMS ERROR:" : NULL, raw, response);
++    if (result == -1 || (result && !response->end_flag_matched[0])) quarantine(port);
++    pthread_mutex_lock(&port->response_mutex);
++    port->prompt_pending = result == 0 && !strcmp(response->end_flag_matched, ">");
++    pthread_mutex_unlock(&port->response_mutex);
++done:
++    pthread_mutex_unlock(&port->session_mutex); return result;
++}
+diff --git a/application/ubus_at_daemon/src/ubus_at_daemon.h b/application/ubus_at_daemon/src/ubus_at_daemon.h
+index 658bd01..87fd0e6 100644
+--- a/application/ubus_at_daemon/src/ubus_at_daemon.h
++++ b/application/ubus_at_daemon/src/ubus_at_daemon.h
+@@ -12,6 +12,7 @@
+ #include <regex.h>
+ #include <time.h>
+ #include <stdint.h>
++#include <sys/types.h>
+ #ifndef QMODEM_HOST_TEST
+ #include <json-c/json.h>
+ #include <libubus.h>
+@@ -95,6 +96,15 @@ typedef void (*at_line_event_publisher_t)(const at_line_event_t *event,
+ typedef struct at_port_instance {
+     char port_path[MAX_PORT_PATH_SIZE];
+     int fd;
++    int is_tcp;
++    dev_t device_id;
++    /* session_mutex protects the full operation lease; response_mutex protects
++     * prompt_pending and quarantined, which are also read by the reader. */
++    pthread_mutex_t session_mutex;
++    char lease_owner[65];
++    uint64_t lease_deadline_ms;
++    int prompt_pending;
++    int quarantined;
+     struct termios termios_config;
+     
+     // Port configuration for reconnection
+@@ -187,6 +197,12 @@ typedef struct {
+     int monitor_should_stop;
+ } at_daemon_ctx_t;
+ 
++/* Lease return values: 0 success, 1 busy, -2 rejected/quarantined.
++ * send additionally returns -1 on timeout. Never expose lease_owner in list. */
++int at_session_acquire(at_port_instance_t *port, const char *owner, int ttl, int baudrate);
++int at_session_release(at_port_instance_t *port, const char *owner);
++int at_session_send(at_port_instance_t *port, const char *owner, const char *cmd,
++                    int timeout, const char *end_flag, int raw, at_response_t *response);
+ // Function declarations
+ at_port_instance_t *find_port_instance(const char *port_path);
+ at_port_instance_t *create_port_instance(const char *port_path);
+@@ -229,37 +245,6 @@ void check_and_reconnect_port(at_port_instance_t *port);
+ void start_port_monitor(void);
+ void stop_port_monitor(void);
+ 
+-#ifndef QMODEM_HOST_TEST
+-// Ubus method handlers
+-static int ubus_open_method(struct ubus_context *ctx, struct ubus_object *obj,
+-                           struct ubus_request_data *req, const char *method,
+-                           struct blob_attr *msg);
+-static int ubus_sendat_method(struct ubus_context *ctx, struct ubus_object *obj,
+-                             struct ubus_request_data *req, const char *method,
+-                             struct blob_attr *msg);
+-static int ubus_list_method(struct ubus_context *ctx, struct ubus_object *obj,
+-                           struct ubus_request_data *req, const char *method,
+-                           struct blob_attr *msg);
+-static int ubus_close_method(struct ubus_context *ctx, struct ubus_object *obj,
+-                            struct ubus_request_data *req, const char *method,
+-                            struct blob_attr *msg);
+-static int ubus_event_callback_method(struct ubus_context *ctx, struct ubus_object *obj,
+-                                     struct ubus_request_data *req, const char *method,
+-                                     struct blob_attr *msg);
+-static int ubus_event_callback_list_method(struct ubus_context *ctx, struct ubus_object *obj,
+-                                          struct ubus_request_data *req, const char *method,
+-                                          struct blob_attr *msg);
+-static int ubus_event_callback_remove_method(struct ubus_context *ctx, struct ubus_object *obj,
+-                                            struct ubus_request_data *req, const char *method,
+-                                            struct blob_attr *msg);
+-static int ubus_event_callback_clear_method(struct ubus_context *ctx, struct ubus_object *obj,
+-                                           struct ubus_request_data *req, const char *method,
+-                                           struct blob_attr *msg);
+-static int ubus_load_conf_method(struct ubus_context *ctx, struct ubus_object *obj,
+-                                struct ubus_request_data *req, const char *method,
+-                                struct blob_attr *msg);
+-#endif
+-
+ extern at_daemon_ctx_t g_daemon_ctx;
+ 
+ #endif // UBUS_AT_DAEMON_H
+diff --git a/application/ubus_at_daemon/tests/Makefile b/application/ubus_at_daemon/tests/Makefile
+index 6f32e21..f2725e0 100644
+--- a/application/ubus_at_daemon/tests/Makefile
++++ b/application/ubus_at_daemon/tests/Makefile
+@@ -1,12 +1,18 @@
+ CC ?= cc
+ CFLAGS ?= -O2 -g -Wall -Wextra -Werror -std=c99 -D_GNU_SOURCE -DQMODEM_HOST_TEST
+ SRC := ../src
+-TIMEOUT ?= timeout 10s
++TIMEOUT ?= python3 run_timeout.py 20
++ifeq ($(shell uname -s),Darwin)
++CFLAGS += -Icompat -include host_compat.h
++WRAP_FLAGS = -DQMODEM_WRAP_PTHREAD
++else
++WRAP_FLAGS = -Wl,--wrap=pthread_mutex_lock -Wl,--wrap=pthread_join
++endif
+ 
+ .PHONY: all baseline clean
+ 
+ all: baseline test_terminal_matching test_line_event_queue test_reader_flood test_port_lifecycle \
+-	test_port_concurrency test_production_reader_lifecycle test_uloop_adapter
++	test_port_concurrency test_production_reader_lifecycle test_uloop_adapter shared
+ 	$(TIMEOUT) ./test_terminal_matching
+ 	$(TIMEOUT) ./test_line_event_queue
+ 	$(TIMEOUT) ./test_reader_flood
+@@ -39,12 +45,20 @@ test_port_concurrency: test_port_concurrency.c $(SRC)/port_manager.c $(SRC)/line
+ test_production_reader_lifecycle: test_production_reader_lifecycle.c $(SRC)/port_manager.c \
+ 		$(SRC)/at_handler.c $(SRC)/line_events.c
+ 	$(CC) $(CFLAGS) -I$(SRC) $^ -o $@ -pthread -lutil \
+-		-Wl,--wrap=pthread_mutex_lock -Wl,--wrap=pthread_join
++		$(WRAP_FLAGS)
+ 
+ test_uloop_adapter: test_uloop_adapter.c
+ 	$(CC) $(filter-out -DQMODEM_HOST_TEST,$(CFLAGS)) -Wno-unused-function \
+ 		-Ifakes -I$(SRC) $< -o $@ -pthread
+ 
+ clean:
+-	rm -f test_response_baseline test_terminal_matching test_line_event_queue test_reader_flood \
++	rm -rf test_*.dSYM
++	rm -f test_shared_sessions test_response_baseline test_terminal_matching test_line_event_queue test_reader_flood \
+ 		test_port_lifecycle test_port_concurrency test_production_reader_lifecycle test_uloop_adapter
++
++.PHONY: shared
++shared: test_shared_sessions
++	$(TIMEOUT) ./test_shared_sessions
++
++test_shared_sessions: test_shared_sessions.c $(SRC)/port_manager.c $(SRC)/at_handler.c $(SRC)/line_events.c $(SRC)/session.c
++	$(CC) $(CFLAGS) -I$(SRC) $^ -o $@ -pthread -lutil
+diff --git a/application/ubus_at_daemon/tests/compat/pty.h b/application/ubus_at_daemon/tests/compat/pty.h
+new file mode 100644
+index 0000000..ecd47c6
+--- /dev/null
++++ b/application/ubus_at_daemon/tests/compat/pty.h
+@@ -0,0 +1,5 @@
++#ifdef __APPLE__
++#include <util.h>
++#else
++#include_next <pty.h>
++#endif
+diff --git a/application/ubus_at_daemon/tests/host_compat.h b/application/ubus_at_daemon/tests/host_compat.h
+new file mode 100644
+index 0000000..c9da494
+--- /dev/null
++++ b/application/ubus_at_daemon/tests/host_compat.h
+@@ -0,0 +1,48 @@
++#ifndef QMODEM_HOST_COMPAT_H
++#define QMODEM_HOST_COMPAT_H
++#ifdef __APPLE__
++#include <unistd.h>
++#include <fcntl.h>
++#include <termios.h>
++#include <pthread.h>
++#ifndef B460800
++#define B460800 B230400
++#endif
++#ifndef B921600
++#define B921600 B230400
++#endif
++static inline int host_pipe2(int fd[2], int flags) {
++    if (pipe(fd)) return -1;
++    if (fcntl(fd[0], F_SETFL, flags & O_NONBLOCK) || fcntl(fd[1], F_SETFL, flags & O_NONBLOCK) ||
++        fcntl(fd[0], F_SETFD, FD_CLOEXEC) || fcntl(fd[1], F_SETFD, FD_CLOEXEC)) {
++        close(fd[0]); close(fd[1]); return -1;
++    }
++    return 0;
++}
++#define pipe2 host_pipe2
++#define PTHREAD_BARRIER_SERIAL_THREAD 1
++typedef struct { pthread_mutex_t mutex; pthread_cond_t cond; unsigned count, waiting, generation; } pthread_barrier_t;
++static inline int pthread_barrier_init(pthread_barrier_t *b, const void *attr, unsigned count) {
++    (void)attr; b->count = count; b->waiting = b->generation = 0;
++    pthread_mutex_init(&b->mutex, NULL); return pthread_cond_init(&b->cond, NULL);
++}
++static inline int pthread_barrier_wait(pthread_barrier_t *b) {
++    pthread_mutex_lock(&b->mutex); unsigned generation = b->generation;
++    if (++b->waiting == b->count) { b->waiting = 0; b->generation++; pthread_cond_broadcast(&b->cond);
++        pthread_mutex_unlock(&b->mutex); return PTHREAD_BARRIER_SERIAL_THREAD; }
++    while (generation == b->generation) pthread_cond_wait(&b->cond, &b->mutex);
++    pthread_mutex_unlock(&b->mutex); return 0;
++}
++static inline int pthread_barrier_destroy(pthread_barrier_t *b) {
++    pthread_cond_destroy(&b->cond); return pthread_mutex_destroy(&b->mutex);
++}
++#ifdef QMODEM_WRAP_PTHREAD
++int __real_pthread_mutex_lock(pthread_mutex_t *) __asm__("_pthread_mutex_lock");
++int __real_pthread_join(pthread_t, void **) __asm__("_pthread_join");
++int __wrap_pthread_mutex_lock(pthread_mutex_t *);
++int __wrap_pthread_join(pthread_t, void **);
++#define pthread_mutex_lock __wrap_pthread_mutex_lock
++#define pthread_join __wrap_pthread_join
++#endif
++#endif
++#endif
+diff --git a/application/ubus_at_daemon/tests/run_timeout.py b/application/ubus_at_daemon/tests/run_timeout.py
+new file mode 100644
+index 0000000..3e78ffc
+--- /dev/null
++++ b/application/ubus_at_daemon/tests/run_timeout.py
+@@ -0,0 +1,5 @@
++import subprocess, sys
++try:
++    sys.exit(subprocess.run(sys.argv[2:], timeout=float(sys.argv[1])).returncode)
++except subprocess.TimeoutExpired:
++    sys.exit("native test timed out")
+diff --git a/application/ubus_at_daemon/tests/test_port_concurrency.c b/application/ubus_at_daemon/tests/test_port_concurrency.c
+index 2b408b2..a586611 100644
+--- a/application/ubus_at_daemon/tests/test_port_concurrency.c
++++ b/application/ubus_at_daemon/tests/test_port_concurrency.c
+@@ -74,7 +74,7 @@ int main(void)
+     assert(pthread_mutex_init(&g_daemon_ctx.ports_mutex, NULL) == 0);
+     assert(at_line_events_init(&g_daemon_ctx.line_events) == 0);
+     g_daemon_ctx.daemon_epoch = 1234;
+-    port = create_port_instance("concurrency-test");
++    port = create_port_instance("/dev/null");
+     assert(port != NULL);
+     assert(pthread_barrier_init(&start_barrier, NULL, 3) == 0);
+     assert(pthread_create(&lifecycle, NULL, lifecycle_worker, port) == 0);
+diff --git a/application/ubus_at_daemon/tests/test_port_lifecycle.c b/application/ubus_at_daemon/tests/test_port_lifecycle.c
+index 22c759b..9f0f6f0 100644
+--- a/application/ubus_at_daemon/tests/test_port_lifecycle.c
++++ b/application/ubus_at_daemon/tests/test_port_lifecycle.c
+@@ -2,6 +2,7 @@
+ 
+ #include <assert.h>
+ #include <pty.h>
++#include <sys/ioctl.h>
+ 
+ at_daemon_ctx_t g_daemon_ctx;
+ 
+@@ -82,6 +83,9 @@ int main(void)
+ 
+     port = create_and_open(slave_name, 7000);
+     pthread_mutex_lock(&port->state_mutex);
++    /* Simulate a lost descriptor without leaking its exclusive tty claim. */
++    ioctl(port->fd, TIOCNXCL);
++    close(port->fd);
+     port->fd = -2;
+     pthread_mutex_unlock(&port->state_mutex);
+     usleep(10000);
+diff --git a/application/ubus_at_daemon/tests/test_production_reader_lifecycle.c b/application/ubus_at_daemon/tests/test_production_reader_lifecycle.c
+index 4b77713..7c29240 100644
+--- a/application/ubus_at_daemon/tests/test_production_reader_lifecycle.c
++++ b/application/ubus_at_daemon/tests/test_production_reader_lifecycle.c
+@@ -132,8 +132,13 @@ static void *open_worker(void *arg)
+ 
+ static void timed_join(pthread_t thread, void **retval, const char *failure)
+ {
++#ifdef __APPLE__
++    /* macOS has no timed join; the Makefile's process timeout is the guard. */
++    int result = pthread_join(thread, retval);
++#else
+     struct timespec deadline = deadline_after_ms(2000);
+     int result = pthread_timedjoin_np(thread, retval, &deadline);
++#endif
+ 
+     if (result == ETIMEDOUT)
+         fprintf(stderr, "TIMEOUT: %s\n", failure);
+diff --git a/application/ubus_at_daemon/tests/test_shared_sessions.c b/application/ubus_at_daemon/tests/test_shared_sessions.c
+new file mode 100644
+index 0000000..df986f0
+--- /dev/null
++++ b/application/ubus_at_daemon/tests/test_shared_sessions.c
+@@ -0,0 +1,151 @@
++/* Real PTY/TCP integration: catches ownership bypass, split SMS transactions,
++ * NUL truncation, late replies being reused, and reconnect regressions. */
++#include "ubus_at_daemon.h"
++#include <assert.h>
++#ifdef __APPLE__
++#include <util.h>
++#else
++#include <pty.h>
++#endif
++#include <arpa/inet.h>
++#include <sys/socket.h>
++#include <poll.h>
++
++at_daemon_ctx_t g_daemon_ctx;
++void process_incoming_data(at_port_instance_t *port, const char *line) { (void)port; (void)line; }
++void clear_event_callbacks(at_port_instance_t *port) { (void)port; }
++static const char *owner_a = "0123456789abcdef0123456789abcdef";
++static const char *owner_b = "abcdef0123456789abcdef0123456789";
++
++struct peer { int fd; const unsigned char *want; size_t len; const char *reply; };
++static void *reply_peer(void *data) {
++    struct peer *p = data;
++    unsigned char got[2048]; size_t used = 0;
++    while (used < p->len) {
++        struct pollfd f = { .fd = p->fd, .events = POLLIN };
++        assert(poll(&f, 1, 3000) > 0);
++        ssize_t n = read(p->fd, got + used, p->len - used);
++        assert(n > 0); used += (size_t)n;
++    }
++    assert(!memcmp(got, p->want, p->len));
++    assert(write(p->fd, p->reply, strlen(p->reply)) == (ssize_t)strlen(p->reply));
++    return NULL;
++}
++static int command(at_port_instance_t *port, int fd, const char *cmd,
++                   int raw, const char *end, const unsigned char *want,
++                   size_t len, const char *reply, at_response_t *response) {
++    pthread_t thread; struct peer peer = { fd, want, len, reply };
++    assert(!pthread_create(&thread, NULL, reply_peer, &peer));
++#ifdef TEST_TRANSPORT_ONLY
++    int result = send_at_command_with_response(port, cmd, 1, end, raw, response);
++#else
++    int result = at_session_send(port, owner_a, cmd, 1, end, raw, response);
++#endif
++    pthread_join(thread, NULL); return result;
++}
++static void test_pty(void) {
++    int master, slave; char path[128]; at_response_t response;
++    assert(openpty(&master, &slave, path, NULL, NULL) == 0);
++    close(slave);
++    at_port_instance_t *port = create_port_instance(path); assert(port);
++#ifdef TEST_TRANSPORT_ONLY
++    assert(open_at_port(port, 115200, 8, 0, 1) == 0);
++#else
++    assert(at_session_acquire(port, "bad", 120, 115200) == -2);
++    assert(at_session_acquire(port, owner_a, 0, 115200) == -2);
++    assert(at_session_acquire(port, owner_a, 120, 115200) == 0);
++    int fd = port->fd;
++    assert(at_session_acquire(port, owner_b, 120, 115200) == 1);
++    assert(at_session_release(port, owner_b) == -2);
++    assert(at_session_send(port, owner_b, "AT", 1, NULL, 0, &response) == -2);
++    assert(at_session_send(port, owner_a, "AT", 61, NULL, 0, &response) == -2);
++    assert(at_session_release(port, owner_a) == 0);
++    assert(at_session_acquire(port, owner_a, 120, 115200) == 0 && port->fd == fd);
++    char alias[256]; snprintf(alias, sizeof(alias), "/tmp/qmodem-alias-%ld", (long)getpid());
++    unlink(alias); assert(symlink(path, alias) == 0);
++    assert(find_port_instance(alias) == port);
++    assert(create_port_instance(alias) == port);
++    unlink(alias);
++#endif
++    assert(command(port, master, "AT", 0, NULL, (const unsigned char *)"AT\r\n", 4, "\r\nOK\r\n", &response) == 0);
++#ifndef TEST_TRANSPORT_ONLY
++    assert(at_session_send(port, owner_a, "41540d0a41540d0a", 1, NULL, 1, &response) == -2);
++#endif
++    assert(command(port, master, "AT+CMGS=4", 0, ">", (const unsigned char *)"AT+CMGS=4\r\n", 11, "\r\n> ", &response) == 0);
++#ifndef TEST_TRANSPORT_ONLY
++    assert(at_session_acquire(port, owner_b, 120, 115200) == 1);
++    assert(at_session_send(port, owner_a, "AT", 1, NULL, 0, &response) == -2);
++#endif
++    const unsigned char payload[] = { 'A', 0, 'B', 0x1a };
++    assert(command(port, master, "4100421a", 1, NULL, payload, sizeof(payload), "\r\n+CMGS: 1\r\nOK\r\n", &response) == 0);
++    assert(!strcmp(response.end_flag_matched, "OK"));
++    assert(command(port, master, "AT+FAIL", 0, "OK", (const unsigned char *)"AT+FAIL\r\n", 9, "\r\n+CME ERROR: 10\r\n", &response) == -2);
++#ifndef TEST_TRANSPORT_ONLY
++    /* The lease expiration must also cancel a prompt, not transfer SMS input. */
++    assert(command(port, master, "AT+CMGS=4", 0, ">", (const unsigned char *)"AT+CMGS=4\r\n", 11, "\r\n> ", &response) == 0);
++    struct peer cancel = { master, (const unsigned char *)"\x1b", 1, "\r\nOK\r\n" }; pthread_t cancel_thread;
++    assert(!pthread_create(&cancel_thread, NULL, reply_peer, &cancel));
++    assert(at_session_release(port, owner_a) == 0);
++    pthread_join(cancel_thread, NULL);
++    assert(at_session_acquire(port, owner_a, 1, 115200) == 0);
++    assert(command(port, master, "AT+CMGS=4", 0, ">", (const unsigned char *)"AT+CMGS=4\r\n", 11, "\r\n> ", &response) == 0);
++    assert(at_session_acquire(port, owner_a, 1, 115200) == 0);
++    sleep(2);
++    assert(!pthread_create(&cancel_thread, NULL, reply_peer, &cancel));
++    assert(at_session_acquire(port, owner_b, 120, 115200) == 0);
++    pthread_join(cancel_thread, NULL);
++    assert(at_session_release(port, owner_a) == -2);
++    assert(at_session_release(port, owner_b) == 0);
++    assert(at_session_acquire(port, owner_a, 120, 115200) == 0);
++    assert(at_session_send(port, owner_a, "AT+HANG", 1, NULL, 0, &response) == -1);
++    assert(write(master, "\r\nOK\r\n", 6) == 6); usleep(30000);
++    assert(at_session_release(port, owner_a) == -2);
++    assert(at_session_acquire(port, owner_b, 120, 115200) == -2);
++    assert(at_session_send(port, owner_a, "AT", 1, NULL, 0, &response) == -2);
++#endif
++    destroy_port_instance(port); close(master);
++}
++#ifndef TEST_TRANSPORT_ONLY
++static void test_oversize(void) {
++    int master, slave; char path[128]; at_response_t response;
++    assert(!openpty(&master, &slave, path, NULL, NULL)); close(slave);
++    at_port_instance_t *port = create_port_instance(path); assert(port);
++    assert(at_session_acquire(port, owner_a, 120, 115200) == 0);
++    char *reply = malloc(40016); assert(reply);
++    memset(reply, 'A', 40000); strcpy(reply + 40000, "\r\nOK\r\n");
++    assert(command(port, master, "AT+LONG", 0, NULL, (const unsigned char *)"AT+LONG\r\n", 9, reply, &response) == -2);
++    assert(at_session_acquire(port, owner_b, 120, 115200) == -2);
++    free(reply); destroy_port_instance(port); close(master);
++}
++static void test_tcp(void) {
++    int listener = socket(AF_INET, SOCK_STREAM, 0); assert(listener >= 0);
++    struct sockaddr_in addr = { .sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK) };
++    assert(!bind(listener, (struct sockaddr *)&addr, sizeof(addr))); assert(!listen(listener, 2));
++    socklen_t len = sizeof(addr); assert(!getsockname(listener, (struct sockaddr *)&addr, &len));
++    char endpoint[80]; snprintf(endpoint, sizeof(endpoint), "tcp://127.0.0.1:%u", ntohs(addr.sin_port));
++    at_port_instance_t *port = create_port_instance(endpoint); assert(port);
++    assert(at_session_acquire(port, owner_a, 120, 115200) == 0);
++    int peer = accept(listener, NULL, NULL); assert(peer >= 0); at_response_t response;
++    assert(command(port, peer, "AT", 0, NULL, (const unsigned char *)"AT\r\n", 4, "\r\nOK\r\n", &response) == 0);
++    assert(at_session_release(port, owner_a) == 0); close(peer); usleep(50000);
++    assert(at_session_acquire(port, owner_a, 120, 115200) == 0);
++    peer = accept(listener, NULL, NULL); assert(peer >= 0);
++    assert(command(port, peer, "AT", 0, NULL, (const unsigned char *)"AT\r\n", 4, "\r\nOK\r\n", &response) == 0);
++    assert(at_session_release(port, owner_a) == 0);
++    close(peer); destroy_port_instance(port); close(listener);
++    assert(!create_port_instance("tcp://localhost:1234"));
++    assert(!create_port_instance("tcp://127.0.0.1:0"));
++    assert(!create_port_instance("tcp://127.0.0.1:1234/extra"));
++}
++#endif
++int main(void) {
++    alarm(20); pthread_mutex_init(&g_daemon_ctx.ports_mutex, NULL);
++    assert(!at_line_events_init(&g_daemon_ctx.line_events));
++    (void)owner_a; (void)owner_b; test_pty();
++#ifndef TEST_TRANSPORT_ONLY
++    test_oversize();
++    test_tcp();
++#endif
++    at_line_events_cleanup(&g_daemon_ctx.line_events);
++    puts("PASS leases, alias ownership, PTY prompt/binary SMS, cancellation, timeout quarantine and TCP reconnect");
++}

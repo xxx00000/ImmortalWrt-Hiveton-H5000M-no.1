@@ -6,7 +6,8 @@ set -eu
 key="$(uci -q get at-webserver.config.websocket_auth_key || true)"
 [ -z "$key" ] || exit 0
 
-key="$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')"
+# Python is a required runtime of at-webserver; BusyBox does not ship od here.
+key="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
 [ "${#key}" -eq 64 ] || exit 1
 case "$key" in *[!0-9a-f]*) exit 1 ;; esac
 uci -q set "at-webserver.config.websocket_auth_key=$key"

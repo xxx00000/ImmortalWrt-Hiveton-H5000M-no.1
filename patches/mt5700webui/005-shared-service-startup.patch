@@ -1,0 +1,456 @@
+--- a/at-webserver/files/etc/init.d/at-webserver
++++ b/at-webserver/files/etc/init.d/at-webserver
+@@ -1,312 +1,57 @@
+ #!/bin/sh /etc/rc.common
+-
+ START=99
+ STOP=10
++USE_PROCD=1
+ 
+-USE_PROCD=1
+-PROG=/usr/bin/at-server.py
+-PROG_NAME="at-server.py"
+-
+-# 加载 UCI 函数库（必须在文件顶部）
+-. /lib/functions.sh
++remove_old_web_rule() {
++    local name
++    config_get name "$1" name
++    case "$name" in
++        at_webserver_wan_allow|at_webserver_wan_block|at_module_wan_allow)
++            uci -q delete "firewall.$1"
++            ;;
++    esac
++}
+ 
+ start_service() {
+-	local enabled
+-	
+-	# 输出到系统日志
+-	logger -t at-webserver "开始启动服务..."
+-	
+-	# 确保最新的 UCI 已提交
+-	uci -q commit at-webserver
+-	
+-	# 加载配置
+-	config_load at-webserver
+-	config_get_bool enabled config enabled 0
+-	
+-	if [ "$enabled" -eq 0 ]; then
+-		logger -t at-webserver "服务已禁用，退出启动"
+-		echo "AT WebServer is disabled in configuration"
+-		return 1
+-	fi
+-	
+-	# Auto-start must not expose an anonymous AT control endpoint.
+-	/usr/libexec/at-webserver-auth || {
+-		logger -t at-webserver "Cannot persist WebSocket authentication key; service not started"
+-		return 1
+-	}
+-
+-	# 检查 Python 脚本是否存在
+-	if [ ! -f "$PROG" ]; then
+-		logger -t at-webserver "错误：找不到脚本文件 $PROG"
+-		echo "Error: $PROG not found"
+-		return 1
+-	fi
+-	
+-	# 检查 Python3 是否存在
+-	if ! command -v python3 >/dev/null 2>&1; then
+-		logger -t at-webserver "错误：python3 未安装"
+-		echo "Error: python3 not found"
+-		return 1
+-	fi
+-	
+-	# 自动检测并添加 USB 串口设备 ID（如果需要）
+-	detect_and_add_usb_serial() {
+-		# 仅在发现 MT5700 且尚无 ttyUSB* 时处理
+-		if ! lsusb -d 3466:3301 >/dev/null 2>&1; then
+-			return 0
+-		fi
+-		if ls /dev/ttyUSB* >/dev/null 2>&1; then
+-			return 0
+-		fi
+-
+-		# 加载必要模块（忽略已加载）
+-		modprobe usbserial 2>/dev/null || true
+-		modprobe option 2>/dev/null || true
+-		modprobe qcserial 2>/dev/null || true
+-
+-		# 兼容不同内核的 new_id 路径
+-		local NEW_ID=""
+-		[ -e /sys/bus/usb-serial/drivers/option/new_id ] && NEW_ID=/sys/bus/usb-serial/drivers/option/new_id
+-		[ -z "$NEW_ID" ] && [ -e /sys/bus/usb-serial/drivers/option1/new_id ] && NEW_ID=/sys/bus/usb-serial/drivers/option1/new_id
+-		if [ -z "$NEW_ID" ]; then
+-			logger -t at-webserver "option(1) driver not ready, skip new_id"
+-			return 0
+-		fi
+-
+-		# 仅绑定一次
+-		if ! grep -q "3466[[:space:]]\+3301" "$NEW_ID" 2>/dev/null; then
+-			echo "3466 3301" > "$NEW_ID" 2>/dev/null && \
+-				logger -t at-webserver "已添加 USB 设备 ID: 3466:3301 to $(basename $(dirname $NEW_ID))" || \
+-				logger -t at-webserver "添加 USB 设备 ID 失败: 3466:3301"
+-		fi
+-
+-		# 等待设备节点出现
+-		sleep 1
+-	}
+-	
+-	detect_and_add_usb_serial
+-	
+-	# 配置防火墙规则（控制外网访问和模块访问限制）
+-	setup_firewall() {
+-		local allow_wan
+-		local ws_port
+-		local module_allow_wan
+-		local restrict_module
+-		local module_host
+-		local module_port
+-		
+-		config_get_bool allow_wan config websocket_allow_wan 0
+-		config_get ws_port config websocket_port 8765
+-		config_get_bool module_allow_wan config network_allow_wan 0
+-		config_get_bool restrict_module config network_restrict_access 0
+-		config_get module_host config network_host '192.168.8.1'
+-		config_get module_port config network_port '20249'
+-		
+-	# 删除旧的 WebSocket WAN 规则（阻止）
+-	local rule_name="at_webserver_wan_block"
+-	local rule_idx=$(uci show firewall | grep "\.name='$rule_name'" | cut -d'[' -f2 | cut -d']' -f1 | head -n1)
+-	if [ -n "$rule_idx" ]; then
+-		uci delete firewall.@rule[$rule_idx] 2>/dev/null
+-	fi
+-	
+-	# 删除旧的 WebSocket WAN 规则（允许）
+-	rule_name="at_webserver_wan_allow"
+-	rule_idx=$(uci show firewall | grep "\.name='$rule_name'" | cut -d'[' -f2 | cut -d']' -f1 | head -n1)
+-	if [ -n "$rule_idx" ]; then
+-		uci delete firewall.@rule[$rule_idx] 2>/dev/null
+-	fi
+-		
+-		# 删除旧的模块 LAN 访问限制规则
+-		rule_name="at_module_restrict"
+-		rule_idx=$(uci show firewall | grep "\.name='$rule_name'" | cut -d'[' -f2 | cut -d']' -f1 | head -n1)
+-		if [ -n "$rule_idx" ]; then
+-			uci delete firewall.@rule[$rule_idx] 2>/dev/null
+-		fi
+-		
+-	# 删除旧的模块 WAN 访问限制规则（阻止）
+-	rule_name="at_module_wan_block"
+-	rule_idx=$(uci show firewall | grep "\.name='$rule_name'" | cut -d'[' -f2 | cut -d']' -f1 | head -n1)
+-	if [ -n "$rule_idx" ]; then
+-		uci delete firewall.@rule[$rule_idx] 2>/dev/null
+-	fi
+-	
+-	# 删除旧的模块 WAN 访问规则（允许）
+-	rule_name="at_module_wan_allow"
+-	rule_idx=$(uci show firewall | grep "\.name='$rule_name'" | cut -d'[' -f2 | cut -d']' -f1 | head -n1)
+-	if [ -n "$rule_idx" ]; then
+-		uci delete firewall.@rule[$rule_idx] 2>/dev/null
+-	fi
+-	
+-	uci commit firewall
+-	
+-	# 模块外网访问控制
+-	if [ "$module_allow_wan" -eq 1 ]; then
+-		# 允许外网访问模块，添加 ACCEPT 规则
+-		uci add firewall rule >/dev/null
+-		uci set firewall.@rule[-1].name="at_module_wan_allow"
+-		uci set firewall.@rule[-1].src='wan'
+-		uci set firewall.@rule[-1].dest='*'
+-		uci set firewall.@rule[-1].dest_ip="$module_host"
+-		uci set firewall.@rule[-1].dest_port="$module_port"
+-		uci set firewall.@rule[-1].proto='tcp'
+-		uci set firewall.@rule[-1].target='ACCEPT'
+-		uci set firewall.@rule[-1].enabled='1'
+-		logger -t at-webserver "已允许外网访问模块 AT 端口: $module_host:$module_port (警告: 不安全!)"
+-	else
+-		# 禁止外网访问模块，添加 REJECT 规则
+-		uci add firewall rule >/dev/null
+-		uci set firewall.@rule[-1].name="at_module_wan_block"
+-		uci set firewall.@rule[-1].src='wan'
+-		uci set firewall.@rule[-1].dest='*'
+-		uci set firewall.@rule[-1].dest_ip="$module_host"
+-		uci set firewall.@rule[-1].dest_port="$module_port"
+-		uci set firewall.@rule[-1].proto='tcp'
+-		uci set firewall.@rule[-1].target='REJECT'
+-		uci set firewall.@rule[-1].enabled='1'
+-		logger -t at-webserver "已禁止外网访问模块 AT 端口: $module_host:$module_port"
+-	fi
+-		
+-	# WebSocket 外网访问控制
+-	if [ "$allow_wan" -eq 1 ]; then
+-		# 允许外网访问，添加 ACCEPT 规则
+-		uci add firewall rule >/dev/null
+-		uci set firewall.@rule[-1].name="at_webserver_wan_allow"
+-		uci set firewall.@rule[-1].src='wan'
+-		uci set firewall.@rule[-1].proto='tcp'
+-		uci set firewall.@rule[-1].dest_port="$ws_port"
+-		uci set firewall.@rule[-1].target='ACCEPT'
+-		uci set firewall.@rule[-1].enabled='1'
+-		logger -t at-webserver "已允许外网访问 WebSocket (端口 $ws_port)"
+-	else
+-		# 禁止外网访问，添加 REJECT 规则（更明确）
+-		uci add firewall rule >/dev/null
+-		uci set firewall.@rule[-1].name="at_webserver_wan_block"
+-		uci set firewall.@rule[-1].src='wan'
+-		uci set firewall.@rule[-1].proto='tcp'
+-		uci set firewall.@rule[-1].dest_port="$ws_port"
+-		uci set firewall.@rule[-1].target='REJECT'
+-		uci set firewall.@rule[-1].enabled='1'
+-		logger -t at-webserver "已禁止外网访问 WebSocket (端口 $ws_port)"
+-	fi
+-		
+-		# 如果启用模块访问限制，阻止局域网其他设备访问模块
+-		if [ "$restrict_module" -eq 1 ]; then
+-			uci add firewall rule >/dev/null
+-			uci set firewall.@rule[-1].name="at_module_restrict"
+-			uci set firewall.@rule[-1].src='lan'
+-			uci set firewall.@rule[-1].dest='*'
+-			uci set firewall.@rule[-1].dest_ip="$module_host"
+-			uci set firewall.@rule[-1].dest_port="$module_port"
+-			uci set firewall.@rule[-1].proto='tcp'
+-			uci set firewall.@rule[-1].target='REJECT'
+-			uci set firewall.@rule[-1].enabled='1'
+-			logger -t at-webserver "已限制模块访问: 仅路由器本身可访问 $module_host:$module_port"
+-		else
+-			logger -t at-webserver "模块访问: 允许局域网设备访问 $module_host:$module_port"
+-		fi
+-		
+-		uci commit firewall
+-		# 重新加载防火墙
+-		/etc/init.d/firewall reload >/dev/null 2>&1
+-	}
+-	
+-	setup_firewall
+-	
+-	# 确保没有旧进程在运行
+-	killall -q -9 "$PROG_NAME" 2>/dev/null
+-	sleep 1
+-	
+-	logger -t at-webserver "配置 procd 实例..."
+-	echo "Starting AT WebServer..."
+-	
+-	# 启动 procd 服务（不指定实例名，使用默认 instance1）
+-	procd_open_instance
+-	procd_set_param command python3 "$PROG"
+-	procd_set_param respawn ${respawn_threshold:-3600} ${respawn_timeout:-5} ${respawn_retry:-5}
+-	procd_set_param stdout 1
+-	procd_set_param stderr 1
+-	procd_set_param pidfile /var/run/at-webserver.pid
+-	procd_close_instance
+-	
+-	logger -t at-webserver "服务启动配置完成，等待 procd 启动进程"
+-	echo "AT WebServer started successfully"
++    local enabled ws_port allow_wan target
++    config_load at-webserver
++    config_get_bool enabled config enabled 1
++    [ "$enabled" = 1 ] || return 0
++    /usr/libexec/at-webserver-auth || return 1
++    config_get ws_port config websocket_port 8765
++    case "$ws_port" in ''|*[!0-9]*) return 1 ;; esac
++    [ "$ws_port" -ge 1 ] && [ "$ws_port" -le 65535 ] || return 1
++    config_get_bool allow_wan config websocket_allow_wan 0
++    target=REJECT
++    [ "$allow_wan" = 1 ] && target=ACCEPT
++    # Remove only rules created by the replaced Web package; an old ACCEPT
++    # must not take precedence over the current WAN restriction.
++    config_load firewall
++    config_foreach remove_old_web_rule rule
++    # Stable rule names avoid accumulating anonymous rules on each restart.
++    uci -q set firewall.h5000m_websocket=rule
++    uci -q set firewall.h5000m_websocket.name='H5000M WebSocket WAN'
++    uci -q set firewall.h5000m_websocket.src='wan'
++    uci -q set firewall.h5000m_websocket.enabled='1'
++    uci -q set firewall.h5000m_websocket.proto='tcp'
++    uci -q set "firewall.h5000m_websocket.dest_port=$ws_port"
++    uci -q set "firewall.h5000m_websocket.target=$target"
++    uci -q commit firewall || return 1
++    /etc/init.d/firewall reload >/dev/null 2>&1 || return 1
++    procd_open_instance
++    procd_set_param command /usr/bin/python3 -u /usr/bin/at-server.py
++    procd_set_param respawn 3600 5 5
++    procd_set_param stdout 1
++    procd_set_param stderr 1
++    procd_close_instance
+ }
+ 
+-stop_service() {
+-	logger -t at-webserver "停止服务..."
+-	echo "Stopping AT WebServer..."
+-	
+-	# 强制杀死所有相关进程
+-	killall -q -9 "$PROG_NAME" 2>/dev/null
+-	
+-	# 清理 pidfile
+-	rm -f /var/run/at-webserver.pid
+-	
+-	# 清理防火墙规则
+-	# 清理 WebSocket WAN 阻止规则
+-	local rule_name="at_webserver_wan_block"
+-	local rule_idx=$(uci show firewall | grep "\.name='$rule_name'" | cut -d'[' -f2 | cut -d']' -f1 | head -n1)
+-	if [ -n "$rule_idx" ]; then
+-		uci delete firewall.@rule[$rule_idx] 2>/dev/null
+-	fi
+-	
+-	# 清理 WebSocket WAN 允许规则
+-	rule_name="at_webserver_wan_allow"
+-	rule_idx=$(uci show firewall | grep "\.name='$rule_name'" | cut -d'[' -f2 | cut -d']' -f1 | head -n1)
+-	if [ -n "$rule_idx" ]; then
+-		uci delete firewall.@rule[$rule_idx] 2>/dev/null
+-	fi
+-	
+-	# 清理模块 LAN 访问限制规则
+-	rule_name="at_module_restrict"
+-	rule_idx=$(uci show firewall | grep "\.name='$rule_name'" | cut -d'[' -f2 | cut -d']' -f1 | head -n1)
+-	if [ -n "$rule_idx" ]; then
+-		uci delete firewall.@rule[$rule_idx] 2>/dev/null
+-	fi
+-	
+-	# 清理模块 WAN 阻止规则
+-	rule_name="at_module_wan_block"
+-	rule_idx=$(uci show firewall | grep "\.name='$rule_name'" | cut -d'[' -f2 | cut -d']' -f1 | head -n1)
+-	if [ -n "$rule_idx" ]; then
+-		uci delete firewall.@rule[$rule_idx] 2>/dev/null
+-	fi
+-	
+-	# 清理模块 WAN 允许规则
+-	rule_name="at_module_wan_allow"
+-	rule_idx=$(uci show firewall | grep "\.name='$rule_name'" | cut -d'[' -f2 | cut -d']' -f1 | head -n1)
+-	if [ -n "$rule_idx" ]; then
+-		uci delete firewall.@rule[$rule_idx] 2>/dev/null
+-	fi
+-	
+-	uci commit firewall
+-	/etc/init.d/firewall reload >/dev/null 2>&1
+-	logger -t at-webserver "已清理所有防火墙规则"
+-	
+-	sleep 1
+-	logger -t at-webserver "服务已停止"
+-	echo "AT WebServer stopped"
++service_triggers() {
++    procd_add_reload_trigger "at-webserver" "qmodem"
+ }
+ 
+ reload_service() {
+-	logger -t at-webserver "重新加载配置..."
+-	echo "Reloading AT WebServer configuration..."
+-	
+-	# 提交最新配置
+-	uci -q commit at-webserver
+-	
+-	# 强制停止所有相关进程
+-	killall -q -9 "$PROG_NAME" 2>/dev/null
+-	rm -f /var/run/at-webserver.pid
+-	
+-	# 等待进程完全停止
+-	sleep 3
+-	
+-	# 重新启动服务
+-	start_service
+-	
+-	logger -t at-webserver "配置重新加载完成"
++    stop
++    start
+ }
+-
+-service_triggers() {
+-	procd_add_reload_trigger "at-webserver"
+-}
+--- a/at-webserver/files/etc/config/at-webserver
++++ b/at-webserver/files/etc/config/at-webserver
+@@ -1,66 +1,14 @@
+-
+ config at-webserver 'config'
+-	option enabled '1'
+-	option connection_type 'NETWORK'
+-	option network_host '192.168.8.1'
+-	option network_port '20249'
+-	option network_timeout '10'
+-	option network_allow_wan '0'          # 是否允许外网访问模块 (0=禁止, 1=允许)
+-	option network_restrict_access '0'    # 限制只有路由器本身可访问模块 (0=允许局域网, 1=仅路由器)
+-	option serial_port '/dev/ttyUSB0'
+-	option serial_port_custom '/dev/ttyUSB0'  # 自定义串口路径（当 serial_port='custom' 时使用）
+-	option serial_baudrate '115200'
+-	option serial_timeout '10'
+-	option websocket_port '8765'
+-	option websocket_allow_wan '0'          # 是否允许外网访问 WebSocket (0=禁止, 1=允许)
+-	option websocket_auth_key ''            # WebSocket 连接密钥（留空则不验证）
+-	
+-	# 通知配置
+-	option wechat_webhook ''
+-	option log_file ''
+-	option notify_sms '1'
+-	option notify_call '1'
+-	option notify_memory_full '1'
+-	option notify_signal '1'
+-	
+-	# 定时锁频配置
+-	option schedule_enabled '0'              # 启用定时锁频
+-	option schedule_check_interval '60'      # 检测间隔（秒）
+-	option schedule_timeout '180'            # 无服务超时时间（秒）
+-	option schedule_unlock_lte '1'           # 恢复时解锁LTE
+-	option schedule_unlock_nr '1'            # 恢复时解锁NR
+-	option schedule_toggle_airplane '1'      # 切换飞行模式生效
+-	
+-	# 定时任务配置
+-	option schedule_night_enabled '1'        # 启用夜间模式
+-	option schedule_night_start '22:00'      # 夜间模式开始时间
+-	option schedule_night_end '06:00'        # 夜间模式结束时间
+-	
+-	# 夜间模式 LTE 配置
+-	option schedule_night_lte_type '3'       # LTE锁定类型: 0=解锁, 1=频点, 2=小区, 3=频段
+-	option schedule_night_lte_bands ''       # LTE频段 (如: "3,8")
+-	option schedule_night_lte_arfcns ''      # LTE频点 (如: "1850,3450")
+-	option schedule_night_lte_pcis ''        # LTE PCI (如: "256,128")
+-	
+-	# 夜间模式 NR 配置
+-	option schedule_night_nr_type '3'        # NR锁定类型: 0=解锁, 1=频点, 2=小区, 3=频段
+-	option schedule_night_nr_bands ''        # NR频段 (如: "78,41")
+-	option schedule_night_nr_arfcns ''       # NR频点 (如: "630000,520000")
+-	option schedule_night_nr_scs_types ''    # NR SCS类型 (如: "1,1")
+-	option schedule_night_nr_pcis ''         # NR PCI (如: "100,200")
+-	
+-	option schedule_day_enabled '1'          # 启用日间模式
+-	
+-	# 日间模式 LTE 配置
+-	option schedule_day_lte_type '3'         # LTE锁定类型: 0=解锁, 1=频点, 2=小区, 3=频段
+-	option schedule_day_lte_bands ''         # LTE频段
+-	option schedule_day_lte_arfcns ''        # LTE频点
+-	option schedule_day_lte_pcis ''          # LTE PCI
+-	
+-	# 日间模式 NR 配置
+-	option schedule_day_nr_type '3'          # NR锁定类型: 0=解锁, 1=频点, 2=小区, 3=频段
+-	option schedule_day_nr_bands ''          # NR频段
+-	option schedule_day_nr_arfcns ''         # NR频点
+-	option schedule_day_nr_scs_types ''      # NR SCS类型
+-	option schedule_day_nr_pcis ''           # NR PCI
+-
++    option enabled '1'
++    option connection_type 'UBUS'
++    option qmodem_section ''
++    option websocket_port '8765'
++    option websocket_allow_wan '0'
++    option websocket_auth_key ''
++    option wechat_webhook ''
++    option log_file '/tmp/at-notifications.log'
++    option notify_sms '1'
++    option notify_call '1'
++    option notify_memory_full '1'
++    option notify_signal '1'
++    option schedule_enabled '0'
+--- a/luci-app-at-webserver/htdocs/luci-static/resources/view/at-webserver/config.js
++++ b/luci-app-at-webserver/htdocs/luci-static/resources/view/at-webserver/config.js
+@@ -92,9 +92,9 @@
+ 	o.default = '0';
+ 
+ 	o = s.option(form.Value, 'websocket_auth_key', _('连接密钥'),
+-		_('WebSocket 连接密钥，用于验证客户端身份。<br>留空则不进行验证（不安全！）<br>建议使用复杂的随机字符串。'));
++		_('设备独立的 WebSocket 连接密钥。留空保存并重启服务后会重新生成随机密钥。'));
+ 	o.password = true;
+-	o.placeholder = '留空表示不验证';
++	o.placeholder = '启动服务时自动生成';
+ 	o.rmempty = true;
+ 
+ 		// Web界面链接
