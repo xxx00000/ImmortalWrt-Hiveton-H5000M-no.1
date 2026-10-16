@@ -45,7 +45,10 @@ jobs:
       - name: Verify real native daemon, QModem CLI and Web transport before firmware build
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake build-essential libjson-c-dev pkg-config
+          sudo apt-get install -y cmake build-essential libjson-c-dev pkg-config squashfs-tools
+          python3 scripts/validate-shared-rootfs.py --check-tools
+          command -v mksquashfs
+          python3 -m unittest discover -s tests -p test_validate_shared_rootfs.py -v
           bash scripts/check-shared-at-native.sh /tmp/qmodem-check
           python3 scripts/check-shared-packages.py /tmp/mt5700webui-check /tmp/qmodem-check
       - name: Validate pinned Python build dependency patch
@@ -95,7 +98,8 @@ jobs:
           DEBIAN_FRONTEND: noninteractive
         run: |
           sudo apt-get update
-          sudo apt-get install -y dos2unix libfuse-dev
+          sudo apt-get install -y dos2unix libfuse-dev squashfs-tools
+          python3 scripts/validate-shared-rootfs.py --check-tools
           for attempt in 1 2 3; do
             timeout 600 sudo bash -c 'bash <(curl -fsSL --retry 3 --connect-timeout 30 https://build-scripts.immortalwrt.org/init_build_environment.sh)' && break
             if [ "$attempt" -eq 3 ]; then exit 1; fi

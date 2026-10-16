@@ -1,13 +1,28 @@
 #!/usr/bin/env python3
 """Inspect the actual built rootfs, not just package selection symbols."""
 import json
+import os
 import pathlib
+import shutil
 import subprocess
 import sys
 import tarfile
 import tempfile
 
-wrt, output = map(pathlib.Path, sys.argv[1:3])
+check_tools = sys.argv[1:] == ['--check-tools']
+if not check_tools and len(sys.argv) != 3:
+    raise SystemExit('Usage: validate-shared-rootfs.py WRT OUTPUT | --check-tools')
+wrt = pathlib.Path('.') if check_tools else pathlib.Path(sys.argv[1])
+# The pinned ImmortalWrt source installs this tool with a "4" suffix.
+host_tool = wrt / 'staging_dir/host/bin/unsquashfs4'
+unsquashfs = str(host_tool.resolve()) if host_tool.is_file() and os.access(host_tool, os.X_OK) else shutil.which('unsquashfs')
+if not unsquashfs:
+    raise SystemExit('Missing SquashFS extractor: install squashfs-tools before building')
+print(f'Rootfs extractor: {unsquashfs}', flush=True)
+if check_tools:
+    subprocess.run([unsquashfs, '-version'], check=True)
+    raise SystemExit(0)
+output = pathlib.Path(sys.argv[2])
 manifest = (output/'BUILT-PACKAGES.manifest').read_text()
 installed = {line.split(' - ')[0] for line in manifest.splitlines()}
 for old in ('luci-app-mt5700m','mt5700m-transport','sms-tool_q'):
@@ -23,7 +38,7 @@ with tempfile.TemporaryDirectory() as directory:
         with archive.extractfile(member) as source:
             (directory/'root.squashfs').write_bytes(source.read())
     root=directory/'root'
-    subprocess.run([str(wrt/'staging_dir/host/bin/unsquashfs'),'-no-progress','-d',str(root),str(directory/'root.squashfs')],check=True,stdout=subprocess.DEVNULL)
+    subprocess.run([unsquashfs,'-no-progress','-d',str(root),str(directory/'root.squashfs')],check=True,stdout=subprocess.DEVNULL)
     for name in ('usr/bin/ubus-at-daemon','usr/bin/tom_modem','usr/bin/at-server.py','usr/libexec/at-webserver-auth','usr/libexec/qmodem-shared-sms','usr/lib/at-webserver/shared_at.py','usr/lib/at-webserver/shared_sms.py','usr/lib/at-webserver/qmodem_control.py','www/5700/index.html','etc/uci-defaults/98-h5000m-shared-at'):
         assert (root/name).is_file(), f'Missing rootfs file {name}'
     for name in ('usr/sbin/mt5700m-transport','etc/init.d/mt5700m-manager','etc/init.d/mt5700m-traffic','usr/libexec/rpcd/mt5700m'):
