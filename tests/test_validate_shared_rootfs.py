@@ -87,6 +87,21 @@ class SharedRootfsTests(unittest.TestCase):
         self.assertIn('squashfs-tools', result.stderr)
         self.assertFalse((self.output / 'SHARED-AT-VALIDATION.txt').exists())
 
+    def test_preflight_accepts_ubuntu_version_exit_status_one(self):
+        self.extractor.write_text('#!' + sys.executable + '\n'
+                                  'print("unsquashfs version 4.6.1 (2023/03/25)")\n'
+                                  'raise SystemExit(1)\n')
+        result = subprocess.run([sys.executable, str(SCRIPT), '--check-tools'],
+                                cwd=self.base, env=self.env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_preflight_rejects_broken_executable(self):
+        self.extractor.write_text('#!' + sys.executable + '\n'
+                                  'print("cannot load executable")\nraise SystemExit(1)\n')
+        result = subprocess.run([sys.executable, str(SCRIPT), '--check-tools'],
+                                cwd=self.base, env=self.env, capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+
     def test_missing_runtime_still_blocks_acceptance(self):
         (self.root / 'usr/lib/at-webserver/shared_at.py').unlink()
         result = self.validate()

@@ -20,7 +20,12 @@ if not unsquashfs:
     raise SystemExit('Missing SquashFS extractor: install squashfs-tools before building')
 print(f'Rootfs extractor: {unsquashfs}', flush=True)
 if check_tools:
-    subprocess.run([unsquashfs, '-version'], check=True)
+    version = subprocess.run([unsquashfs, '-version'], capture_output=True, text=True)
+    report = version.stdout + version.stderr
+    # Ubuntu 24.04's unsquashfs 4.6.1 returns 1 for a successful version query.
+    if version.returncode not in (0, 1) or not report.startswith('unsquashfs version '):
+        raise SystemExit(f'SquashFS extractor cannot run: {report}')
+    print(report, end='')
     raise SystemExit(0)
 output = pathlib.Path(sys.argv[2])
 manifest = (output/'BUILT-PACKAGES.manifest').read_text()
