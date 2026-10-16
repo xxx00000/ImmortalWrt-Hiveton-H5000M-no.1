@@ -1858,7 +1858,7 @@ index 658bd01..87fd0e6 100644
  
  #endif // UBUS_AT_DAEMON_H
 diff --git a/application/ubus_at_daemon/tests/Makefile b/application/ubus_at_daemon/tests/Makefile
-index 6f32e21..f2725e0 100644
+index 6f32e21..bf88e8a 100644
 --- a/application/ubus_at_daemon/tests/Makefile
 +++ b/application/ubus_at_daemon/tests/Makefile
 @@ -1,12 +1,18 @@
@@ -1871,7 +1871,7 @@ index 6f32e21..f2725e0 100644
 +CFLAGS += -Icompat -include host_compat.h
 +WRAP_FLAGS = -DQMODEM_WRAP_PTHREAD
 +else
-+WRAP_FLAGS = -Wl,--wrap=pthread_mutex_lock -Wl,--wrap=pthread_join
++WRAP_FLAGS = -Wl,--wrap=pthread_mutex_lock -Wl,--wrap=pthread_join -Wl,--wrap=read
 +endif
  
  .PHONY: all baseline clean
@@ -1918,10 +1918,10 @@ index 0000000..ecd47c6
 +#endif
 diff --git a/application/ubus_at_daemon/tests/host_compat.h b/application/ubus_at_daemon/tests/host_compat.h
 new file mode 100644
-index 0000000..c9da494
+index 0000000..a4bac9f
 --- /dev/null
 +++ b/application/ubus_at_daemon/tests/host_compat.h
-@@ -0,0 +1,48 @@
+@@ -0,0 +1,51 @@
 +#ifndef QMODEM_HOST_COMPAT_H
 +#define QMODEM_HOST_COMPAT_H
 +#ifdef __APPLE__
@@ -1963,10 +1963,13 @@ index 0000000..c9da494
 +#ifdef QMODEM_WRAP_PTHREAD
 +int __real_pthread_mutex_lock(pthread_mutex_t *) __asm__("_pthread_mutex_lock");
 +int __real_pthread_join(pthread_t, void **) __asm__("_pthread_join");
++ssize_t __real_read(int, void *, size_t) __asm__("_read");
 +int __wrap_pthread_mutex_lock(pthread_mutex_t *);
 +int __wrap_pthread_join(pthread_t, void **);
++ssize_t __wrap_read(int, void *, size_t);
 +#define pthread_mutex_lock __wrap_pthread_mutex_lock
 +#define pthread_join __wrap_pthread_join
++#define read __wrap_read
 +#endif
 +#endif
 +#endif
@@ -2017,10 +2020,62 @@ index 22c759b..9f0f6f0 100644
      pthread_mutex_unlock(&port->state_mutex);
      usleep(10000);
 diff --git a/application/ubus_at_daemon/tests/test_production_reader_lifecycle.c b/application/ubus_at_daemon/tests/test_production_reader_lifecycle.c
-index 4b77713..7c29240 100644
+index 4b77713..699f0c1 100644
 --- a/application/ubus_at_daemon/tests/test_production_reader_lifecycle.c
 +++ b/application/ubus_at_daemon/tests/test_production_reader_lifecycle.c
-@@ -132,8 +132,13 @@ static void *open_worker(void *arg)
+@@ -2,6 +2,7 @@
+ 
+ #include <assert.h>
+ #include <pty.h>
++#include <sys/ioctl.h>
+ 
+ at_daemon_ctx_t g_daemon_ctx;
+ 
+@@ -14,9 +15,43 @@ static int reader_at_state_lock;
+ static int release_reader;
+ static int join_started;
+ static int self_close_seen;
++static int fault_fd = -1;
++static pthread_t fault_reader;
++static int read_fault_armed;
+ 
+ int __real_pthread_mutex_lock(pthread_mutex_t *mutex);
+ int __real_pthread_join(pthread_t thread, void **retval);
++ssize_t __real_read(int fd, void *buffer, size_t count);
++
++/* A disconnected tty reports an error from read while its descriptor remains
++ * owned by the daemon. Closing that fd from the fixture instead would strand
++ * Linux TIOCEXCL on this fixture's still-open original PTY slave descriptor. */
++ssize_t __wrap_read(int fd, void *buffer, size_t count)
++{
++    int inject;
++    assert(__real_pthread_mutex_lock(&gate_mutex) == 0);
++    inject = read_fault_armed && fd == fault_fd &&
++        pthread_equal(pthread_self(), fault_reader);
++    if (inject)
++        read_fault_armed = 0;
++    assert(pthread_mutex_unlock(&gate_mutex) == 0);
++    if (inject) {
++        errno = EIO;
++        return -1;
++    }
++    return __real_read(fd, buffer, count);
++}
++
++static void assert_exclusive(int fd)
++{
++#ifdef TIOCGEXCL
++    int exclusive = 0;
++    assert(ioctl(fd, TIOCGEXCL, &exclusive) == 0);
++    assert(exclusive == 1);
++#else
++    (void)fd;
++#endif
++}
+ 
+ static struct timespec deadline_after_ms(long milliseconds)
+ {
+@@ -132,8 +167,13 @@ static void *open_worker(void *arg)
  
  static void timed_join(pthread_t thread, void **retval, const char *failure)
  {
@@ -2034,6 +2089,31 @@ index 4b77713..7c29240 100644
  
      if (result == ETIMEDOUT)
          fprintf(stderr, "TIMEOUT: %s\n", failure);
+@@ -146,6 +186,7 @@ static at_port_instance_t *create_open_port(const char *path)
+ 
+     assert(port != NULL);
+     assert(open_at_port(port, 115200, 8, 0, 1) == 0);
++    assert_exclusive(port->fd);
+     return port;
+ }
+ 
+@@ -183,9 +224,15 @@ static void force_reader_error(at_port_instance_t *port)
+     assert(__real_pthread_mutex_lock(&port->state_mutex) == 0);
+     fd = port->fd;
+     assert(fd >= 0);
+-    assert(close(fd) == 0);
++    assert(__real_pthread_mutex_lock(&gate_mutex) == 0);
++    fault_fd = fd;
++    fault_reader = port->reader_thread;
++    read_fault_armed = 1;
++    assert(pthread_mutex_unlock(&gate_mutex) == 0);
+     assert(pthread_mutex_unlock(&port->state_mutex) == 0);
+     wait_for_open_state(port, 0, "production reader did not publish fatal read exit");
++    assert(fcntl(fd, F_GETFL) >= 0);
++    assert_exclusive(fd);
+ }
+ 
+ static void prove_error_exit_reopen_and_monitor(const char *path)
 diff --git a/application/ubus_at_daemon/tests/test_shared_sessions.c b/application/ubus_at_daemon/tests/test_shared_sessions.c
 new file mode 100644
 index 0000000..df986f0
