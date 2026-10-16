@@ -109,13 +109,40 @@ class SharedRootfsTests(unittest.TestCase):
         self.assertIn('Missing rootfs file', result.stderr)
         self.assertFalse((self.output / 'SHARED-AT-VALIDATION.txt').exists())
 
+    def test_device_nodes_are_excluded_without_ignoring_extraction_errors(self):
+        original = self.extractor.read_text()
+        self.extractor.write_text(original.replace(
+            'shutil.copytree(',
+            'if "-excludes" not in sys.argv or sys.argv[-1] != "dev":\n'
+            '    print("cannot create dev/console without superuser", file=sys.stderr)\n'
+            '    raise SystemExit(2)\n'
+            'shutil.copytree('))
+        result = self.validate()
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_real_extraction_errors_still_block_acceptance(self):
+        self.extractor.write_text('#!' + sys.executable + '\nraise SystemExit(2)\n')
+        result = self.validate()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse((self.output / 'SHARED-AT-VALIDATION.txt').exists())
+
     @unittest.skipUnless(shutil.which('mksquashfs') and shutil.which('unsquashfs'),
                          'real squashfs-tools roundtrip runs in Linux CI')
     def test_real_xz_image_extraction_and_runtime_acceptance(self):
+        self.assertNotEqual(os.geteuid(), 0, 'Run this acceptance test without sudo')
+        (self.root / 'dev').mkdir()
         self.squashfs.unlink()
         subprocess.run(['mksquashfs', str(self.root), str(self.squashfs),
-                        '-noappend', '-comp', 'xz', '-no-xattrs', '-processors', '1'],
+                        '-noappend', '-comp', 'xz', '-no-xattrs', '-processors', '1',
+                        '-p', 'dev/console c 0600 0 0 5 1'],
                        check=True, stdout=subprocess.DEVNULL)
+        # Reproduce the real firmware boundary: unfiltered extraction must fail
+        # for the device inode under the same non-root identity used by CI.
+        baseline = subprocess.run(['unsquashfs', '-no-progress', '-d',
+                                   str(self.base / 'unfiltered'), str(self.squashfs)],
+                                  capture_output=True, text=True)
+        self.assertNotEqual(baseline.returncode, 0)
+        self.assertIn('dev/console', baseline.stderr)
         self.pack()
         result = self.validate(os.environ.copy())
         self.assertEqual(result.returncode, 0, result.stderr)

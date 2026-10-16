@@ -43,7 +43,10 @@ with tempfile.TemporaryDirectory() as directory:
         with archive.extractfile(member) as source:
             (directory/'root.squashfs').write_bytes(source.read())
     root=directory/'root'
-    subprocess.run([unsquashfs,'-no-progress','-d',str(root),str(directory/'root.squashfs')],check=True,stdout=subprocess.DEVNULL)
+    # Inspect runtime files as the normal CI user. Device nodes are unrelated
+    # to these checks and require root to recreate; all extraction errors for
+    # the remaining filesystem still fail the job.
+    subprocess.run([unsquashfs,'-no-progress','-d',str(root),'-excludes',str(directory/'root.squashfs'),'dev'],check=True,stdout=subprocess.DEVNULL)
     for name in ('usr/bin/ubus-at-daemon','usr/bin/tom_modem','usr/bin/at-server.py','usr/libexec/at-webserver-auth','usr/libexec/qmodem-shared-sms','usr/lib/at-webserver/shared_at.py','usr/lib/at-webserver/shared_sms.py','usr/lib/at-webserver/qmodem_control.py','www/5700/index.html','etc/uci-defaults/98-h5000m-shared-at'):
         assert (root/name).is_file(), f'Missing rootfs file {name}'
     for name in ('usr/sbin/mt5700m-transport','etc/init.d/mt5700m-manager','etc/init.d/mt5700m-traffic','usr/libexec/rpcd/mt5700m'):
