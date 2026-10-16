@@ -9,6 +9,7 @@ permissions:
   contents: read
 
 env:
+  PACKAGES_COMMIT: 84bd86384928955b568988ca0e09e2c78c75173d
   MT5700WEBUI_COMMIT: 7abccd44c81442b13dbf974ad9a0aa67cf527e90
 
 jobs:
@@ -29,6 +30,17 @@ jobs:
           for patch_file in "$GITHUB_WORKSPACE"/patches/mt5700webui/*.patch; do
             git -C /tmp/mt5700webui-check apply --check "$patch_file"
             git -C /tmp/mt5700webui-check apply "$patch_file"
+          done
+      - name: Validate pinned Python build dependency patch
+        run: |
+          for package in python-pyserial python-websockets; do
+            directory="/tmp/python-feed-check/lang/python/$package"
+            mkdir -p "$directory"
+            curl -fsSL --retry 3 "https://raw.githubusercontent.com/immortalwrt/packages/$PACKAGES_COMMIT/lang/python/$package/Makefile" -o "$directory/Makefile"
+          done
+          for patch_file in "$GITHUB_WORKSPACE"/patches/packages/*.patch; do
+            git -C /tmp/python-feed-check apply --check "$patch_file"
+            git -C /tmp/python-feed-check apply "$patch_file"
           done
       - name: Test runtime with pinned feed dependency versions
         run: |
@@ -90,6 +102,11 @@ jobs:
           sed -i '/^src-.*[[:space:]]video[[:space:]]/d' feeds.conf.default
           printf '\nsrc-git qmodem https://github.com/FUjr/QModem.git^%s\n' "$QMODEM_COMMIT" >> feeds.conf.default
           ./scripts/feeds update -a
+          test "$(git -C feeds/packages rev-parse HEAD)" = "$PACKAGES_COMMIT"
+          for patch_file in "$GITHUB_WORKSPACE"/patches/packages/*.patch; do
+            git -C feeds/packages apply --check "$patch_file"
+            git -C feeds/packages apply "$patch_file"
+          done
           rm -rf feeds/packages/sound/squeezelite
           test "$(git -C feeds/qmodem rev-parse HEAD)" = "$QMODEM_COMMIT"
           grep -qx 'QMODEM_VERSION:=3.3.0' feeds/qmodem/version.mk
@@ -234,6 +251,7 @@ jobs:
             echo "OPENCLASH_COMMIT=$OPENCLASH_COMMIT"
             echo "MT5700WEBUI_COMMIT=$MT5700WEBUI_COMMIT"
           } > output/PLUGIN-COMMITS.txt
+          sha256sum "$GITHUB_WORKSPACE"/patches/packages/*.patch | sed "s|$GITHUB_WORKSPACE/||" > output/PACKAGES-PATCHES.sha256
           sha256sum "$GITHUB_WORKSPACE"/patches/mt5700webui/*.patch | sed "s|$GITHUB_WORKSPACE/||" > output/MT5700WEBUI-PATCHES.sha256
 
       - name: Upload complete firmware artifact

@@ -68,6 +68,8 @@ Argon 主题和首次启动配置；新增 `at-webserver`、`luci-app-at-webserv
   上游使用 `ws://`，独立界面请通过受信任 LAN 的 HTTP 地址访问，HTTPS 页面需要另行配置 WSS 代理。
 - **兼容补丁**：当前固定 feeds 没有 `python3-aiohttp`。企业微信推送改用 Python
   标准库在线程中发送 HTTPS 请求，保留队列和重试，启用系统 CA 证书校验。
+  固定 feeds 的 pyserial/websockets 包补齐 `python-setuptools/host` 构建依赖，
+  解决 `Cannot import setuptools.build_meta` 的完整固件编译错误；版本和运行依赖保持一致。
   清空日志改为 LuCI 登录后的 RPC 文件写入，不安装上游未鉴权的清空日志 CGI。
   补丁位于 `patches/mt5700webui/`；前端资源从固定上游提交获取并应用上述补丁。
 - **验证**：工作流先验证补丁、Webhook 成功/失败/重试和 WebSocket 鉴权，再编译完整固件；
