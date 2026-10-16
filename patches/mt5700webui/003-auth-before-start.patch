@@ -1,0 +1,15 @@
+--- a/at-webserver/files/etc/init.d/at-webserver
++++ b/at-webserver/files/etc/init.d/at-webserver
+@@ -29,6 +29,12 @@
+ 		return 1
+ 	fi
+ 	
++	# Auto-start must not expose an anonymous AT control endpoint.
++	/usr/libexec/at-webserver-auth || {
++		logger -t at-webserver "Cannot persist WebSocket authentication key; service not started"
++		return 1
++	}
++
+ 	# 检查 Python 脚本是否存在
+ 	if [ ! -f "$PROG" ]; then
+ 		logger -t at-webserver "错误：找不到脚本文件 $PROG"

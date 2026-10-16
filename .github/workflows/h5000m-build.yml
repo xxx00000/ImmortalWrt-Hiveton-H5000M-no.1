@@ -2,24 +2,84 @@ name: Hiveton H5000M full firmware
 
 on:
   push:
-    branches: [main]
+    branches: [main, H5000M-notdream5700]
   workflow_dispatch:
 
 permissions:
   contents: read
 
+env:
+  PACKAGES_COMMIT: 84bd86384928955b568988ca0e09e2c78c75173d
+  QMODEM_COMMIT: 5cc80e5f9fc218cd50bef9749dc7d0027e8b3072
+  MT5700WEBUI_COMMIT: 7abccd44c81442b13dbf974ad9a0aa67cf527e90
+
 jobs:
+  webui-check:
+    name: MT5700 Web integration checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out build configuration
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Fetch and patch pinned Web packages
+        run: |
+          git init /tmp/mt5700webui-check
+          git -C /tmp/mt5700webui-check remote add origin https://github.com/inotdream/mt5700webui-openwrt-server.git
+          git -C /tmp/mt5700webui-check fetch --depth=1 origin "$MT5700WEBUI_COMMIT"
+          git -C /tmp/mt5700webui-check checkout --detach FETCH_HEAD
+          test "$(git -C /tmp/mt5700webui-check rev-parse HEAD)" = "$MT5700WEBUI_COMMIT"
+          for patch_file in "$GITHUB_WORKSPACE"/patches/mt5700webui/*.patch; do
+            git -C /tmp/mt5700webui-check apply --check "$patch_file"
+            git -C /tmp/mt5700webui-check apply "$patch_file"
+          done
+      - name: Fetch and patch pinned shared AT service
+        run: |
+          git init /tmp/qmodem-check
+          git -C /tmp/qmodem-check remote add origin https://github.com/FUjr/QModem.git
+          git -C /tmp/qmodem-check fetch --depth=1 origin "$QMODEM_COMMIT"
+          git -C /tmp/qmodem-check checkout --detach FETCH_HEAD
+          for patch_file in "$GITHUB_WORKSPACE"/patches/qmodem/*.patch; do
+            git -C /tmp/qmodem-check apply --check "$patch_file"
+            git -C /tmp/qmodem-check apply "$patch_file"
+          done
+      - name: Verify real native daemon, QModem CLI and Web transport before firmware build
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake build-essential libjson-c-dev pkg-config squashfs-tools
+          python3 scripts/validate-shared-rootfs.py --check-tools
+          command -v mksquashfs
+          python3 -m unittest discover -s tests -p test_validate_shared_rootfs.py -v
+          bash scripts/check-shared-at-native.sh /tmp/qmodem-check
+          python3 scripts/check-shared-packages.py /tmp/mt5700webui-check /tmp/qmodem-check
+      - name: Validate pinned Python build dependency patch
+        run: |
+          for package in python-pyserial python-websockets; do
+            directory="/tmp/python-feed-check/lang/python/$package"
+            mkdir -p "$directory"
+            curl -fsSL --retry 3 "https://raw.githubusercontent.com/immortalwrt/packages/$PACKAGES_COMMIT/lang/python/$package/Makefile" -o "$directory/Makefile"
+          done
+          for patch_file in "$GITHUB_WORKSPACE"/patches/packages/*.patch; do
+            git -C /tmp/python-feed-check apply --check "$patch_file"
+            git -C /tmp/python-feed-check apply "$patch_file"
+          done
+      - name: Test runtime with pinned feed dependency versions
+        run: |
+          python3 -m venv /tmp/mt5700webui-venv
+          /tmp/mt5700webui-venv/bin/pip install 'websockets==11.0.3'
+          PYTHONPATH="$GITHUB_WORKSPACE/files/usr/lib/at-webserver" /tmp/mt5700webui-venv/bin/python tests/integration_mt5700webui.py /tmp/mt5700webui-check/at-webserver/files/usr/bin/at-server.py -v
+          node tests/integration_mt5700webui_logs.cjs /tmp/mt5700webui-check/luci-app-at-webserver/htdocs/luci-static/resources/view/at-webserver/logs.js
+          python3 -m unittest discover -s tests -v
+
   build:
     name: ImmortalWrt 25.12.2 / H5000M
+    needs: webui-check
     runs-on: ubuntu-24.04
     timeout-minutes: 360
     env:
       SOURCE_REPO: https://github.com/immortalwrt/immortalwrt.git
       SOURCE_REF: v25.12.2
       SOURCE_COMMIT: 4fc16f2985a358bd43bb522e43f05395fcbd6ed5
-      QMODEM_COMMIT: 5cc80e5f9fc218cd50bef9749dc7d0027e8b3072
       FANCONTROL_COMMIT: 9bab7f720627b7e00a04d448a37542691b6c65c7
-      MT5700M_COMMIT: 93f6a65e33bab1dde645d7abe0e85e8215ae140d
       NETMODE_COMMIT: c6710f8fb536c84a6e8506d4acdaae4e8c763568
       DISKMAN_COMMIT: be87fcb92c472821bcedbefbfc8b7e8d9e039449
       ARGON_COMMIT: 4b8b7849551c558ec905c40b0ebb864641c9fa32
@@ -38,7 +98,8 @@ jobs:
           DEBIAN_FRONTEND: noninteractive
         run: |
           sudo apt-get update
-          sudo apt-get install -y dos2unix libfuse-dev
+          sudo apt-get install -y dos2unix libfuse-dev squashfs-tools
+          python3 scripts/validate-shared-rootfs.py --check-tools
           for attempt in 1 2 3; do
             timeout 600 sudo bash -c 'bash <(curl -fsSL --retry 3 --connect-timeout 30 https://build-scripts.immortalwrt.org/init_build_environment.sh)' && break
             if [ "$attempt" -eq 3 ]; then exit 1; fi
@@ -60,9 +121,18 @@ jobs:
           sed -i '/^src-.*[[:space:]]video[[:space:]]/d' feeds.conf.default
           printf '\nsrc-git qmodem https://github.com/FUjr/QModem.git^%s\n' "$QMODEM_COMMIT" >> feeds.conf.default
           ./scripts/feeds update -a
+          test "$(git -C feeds/packages rev-parse HEAD)" = "$PACKAGES_COMMIT"
+          for patch_file in "$GITHUB_WORKSPACE"/patches/packages/*.patch; do
+            git -C feeds/packages apply --check "$patch_file"
+            git -C feeds/packages apply "$patch_file"
+          done
           rm -rf feeds/packages/sound/squeezelite
           test "$(git -C feeds/qmodem rev-parse HEAD)" = "$QMODEM_COMMIT"
           grep -qx 'QMODEM_VERSION:=3.3.0' feeds/qmodem/version.mk
+          for patch_file in "$GITHUB_WORKSPACE"/patches/qmodem/*.patch; do
+            git -C feeds/qmodem apply --check "$patch_file"
+            git -C feeds/qmodem apply "$patch_file"
+          done
           ./scripts/feeds install -a
 
       - name: Add pinned H5000M and original plugins
@@ -80,7 +150,6 @@ jobs:
           }
 
           clone_commit https://github.com/FAN789/luci-app-h5000m-fancontrol.git package/luci-app-h5000m-fancontrol "$FANCONTROL_COMMIT"
-          clone_commit https://github.com/FAN789/luci-app-mt5700m.git package/luci-app-mt5700m "$MT5700M_COMMIT"
           clone_commit https://github.com/FAN789/luci-app-h5000m-netmode.git package/luci-app-h5000m-netmode "$NETMODE_COMMIT"
 
           mkdir -p /tmp/h5000m-source
@@ -94,12 +163,31 @@ jobs:
           clone_commit https://github.com/vernesong/OpenClash.git /tmp/h5000m-source/openclash "$OPENCLASH_COMMIT"
           cp -a /tmp/h5000m-source/openclash/luci-app-openclash package/luci-app-openclash
 
+          clone_commit https://github.com/inotdream/mt5700webui-openwrt-server.git /tmp/h5000m-source/mt5700webui "$MT5700WEBUI_COMMIT"
+          for patch_file in "$GITHUB_WORKSPACE"/patches/mt5700webui/*.patch; do
+            git -C /tmp/h5000m-source/mt5700webui apply --check "$patch_file"
+            git -C /tmp/h5000m-source/mt5700webui apply "$patch_file"
+          done
+          cp -a /tmp/h5000m-source/mt5700webui/at-webserver package/at-webserver
+          cp -a /tmp/h5000m-source/mt5700webui/luci-app-at-webserver package/luci-app-at-webserver
+          python3 "$GITHUB_WORKSPACE/scripts/integrate-webui.py" "$GITHUB_WORKSPACE/wrt"
+          find package/at-webserver package/luci-app-at-webserver -type d -name __pycache__ -prune -exec rm -rf {} +
+          find package/luci-app-at-webserver -name '*.backup' -delete
+          python3 -m py_compile package/at-webserver/files/usr/bin/at-server.py
+          sh -n package/at-webserver/files/etc/init.d/at-webserver
+          sh -n package/at-webserver/files/www/cgi-bin/at-ws-info
+          sh -n package/at-webserver/files/www/cgi-bin/at-log-clear
+
           mkdir -p files
           cp -a "$GITHUB_WORKSPACE/files/." files/
+          find files -type d -name __pycache__ -prune -exec rm -rf {} +
           install -Dm644 "$GITHUB_WORKSPACE/baseline/plugins.tsv" files/usr/share/h5000m-baseline/plugins.tsv
           chmod 755 files/etc/uci-defaults/99-h5000m-defaults
           chmod 755 files/etc/init.d/h5000m-defaults
           chmod 755 files/usr/libexec/h5000m-firstboot
+          chmod 755 files/etc/uci-defaults/98-h5000m-shared-at
+          chmod 755 files/usr/libexec/qmodem-shared-sms
+          chmod 755 files/usr/libexec/at-webserver-auth
 
           mkdir -p files/etc
           cp package/base-files/files/etc/shadow files/etc/shadow
@@ -111,6 +199,7 @@ jobs:
           bash -n "$GITHUB_WORKSPACE/files/etc/uci-defaults/99-h5000m-defaults"
           bash -n "$GITHUB_WORKSPACE/files/etc/init.d/h5000m-defaults"
           bash -n "$GITHUB_WORKSPACE/files/usr/libexec/h5000m-firstboot"
+          sh -n "$GITHUB_WORKSPACE/files/usr/libexec/at-webserver-auth"
           python3 -m py_compile "$GITHUB_WORKSPACE/scripts/validate-image.py"
 
       - name: Apply display name and firmware signature
@@ -129,7 +218,10 @@ jobs:
             PACKAGE_luci-theme-argon PACKAGE_luci-app-argon-config \
             PACKAGE_qmodem PACKAGE_luci-app-qmodem-next \
             PACKAGE_luci-app-qmodem-monitor PACKAGE_luci-app-qmodem-ttlfw4 \
-            PACKAGE_luci-app-mt5700m PACKAGE_mt5700m-transport \
+            PACKAGE_ubus-at-daemon PACKAGE_tom_modem \
+            PACKAGE_at-webserver PACKAGE_luci-app-at-webserver \
+            PACKAGE_python3-websockets \
+            PACKAGE_python3-urllib PACKAGE_python3-openssl PACKAGE_ca-bundle \
             PACKAGE_luci-app-h5000m-fancontrol PACKAGE_luci-app-h5000m-netmode \
             PACKAGE_kmod-usb-net-rndis PACKAGE_kmod-usb-net-cdc-ncm \
             PACKAGE_kmod-usb-net-cdc-mbim PACKAGE_kmod-usb-net-qmi-wwan \
@@ -138,7 +230,7 @@ jobs:
             grep -qx "CONFIG_${symbol}=y" .config || { echo "Required selection missing after defconfig: $symbol" >&2; exit 1; }
           done
 
-          for legacy in luci-app-qmodem luci-app-qmodem-ttl; do
+          for legacy in luci-app-qmodem luci-app-qmodem-ttl luci-app-mt5700m luci-i18n-mt5700m-zh-cn mt5700m-transport sms-tool_q; do
             if grep -qx "CONFIG_PACKAGE_${legacy}=y" .config; then
               echo "Legacy QModem UI conflicts with the selected next/fw4 UI: $legacy" >&2
               exit 1
@@ -171,24 +263,28 @@ jobs:
             fi
           done > output/FEEDS-COMMITS.txt
 
-          for package in luci-app-openclash luci-app-diskman luci-app-qmodem-next qmodem luci-app-qmodem-monitor luci-app-qmodem-ttlfw4 luci-app-mt5700m mt5700m-transport luci-app-h5000m-fancontrol luci-app-h5000m-netmode; do
+          for package in luci-app-openclash luci-app-diskman luci-app-qmodem-next qmodem luci-app-qmodem-monitor luci-app-qmodem-ttlfw4 ubus-at-daemon tom_modem luci-app-h5000m-fancontrol luci-app-h5000m-netmode at-webserver luci-app-at-webserver python3-websockets python3-urllib python3-openssl; do
             grep -q "^${package} - " output/BUILT-PACKAGES.manifest || { echo "Required package missing from built image: $package" >&2; exit 1; }
           done
 
           {
             echo "QMODEM_COMMIT=$QMODEM_COMMIT"
             echo "FANCONTROL_COMMIT=$FANCONTROL_COMMIT"
-            echo "MT5700M_COMMIT=$MT5700M_COMMIT"
             echo "NETMODE_COMMIT=$NETMODE_COMMIT"
             echo "DISKMAN_COMMIT=$DISKMAN_COMMIT"
             echo "ARGON_COMMIT=$ARGON_COMMIT"
             echo "OPENCLASH_COMMIT=$OPENCLASH_COMMIT"
+            echo "MT5700WEBUI_COMMIT=$MT5700WEBUI_COMMIT"
           } > output/PLUGIN-COMMITS.txt
+          python3 scripts/validate-shared-rootfs.py wrt output
+          sha256sum "$GITHUB_WORKSPACE"/patches/qmodem/*.patch | sed "s|$GITHUB_WORKSPACE/||" > output/QMODEM-PATCHES.sha256
+          sha256sum "$GITHUB_WORKSPACE"/patches/packages/*.patch | sed "s|$GITHUB_WORKSPACE/||" > output/PACKAGES-PATCHES.sha256
+          sha256sum "$GITHUB_WORKSPACE"/patches/mt5700webui/*.patch | sed "s|$GITHUB_WORKSPACE/||" > output/MT5700WEBUI-PATCHES.sha256
 
       - name: Upload complete firmware artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: H5000M-ImmortalWrt-25.12.2-${{ github.run_id }}
+          name: H5000M-notdream5700-ImmortalWrt-25.12.2-${{ github.run_id }}
           path: output/
           if-no-files-found: error
           retention-days: 14

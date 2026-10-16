@@ -1,0 +1,21 @@
+diff --git a/lang/python/python-pyserial/Makefile b/lang/python/python-pyserial/Makefile
+--- a/lang/python/python-pyserial/Makefile
++++ b/lang/python/python-pyserial/Makefile
+@@ -21,4 +21,6 @@
+ HOST_BUILD_DEPENDS:=python3/host python-build/host python-installer/host python-wheel/host
+ 
++PKG_BUILD_DEPENDS+=python-setuptools/host
++
+ include ../pypi.mk
+ include $(INCLUDE_DIR)/package.mk
+diff --git a/lang/python/python-websockets/Makefile b/lang/python/python-websockets/Makefile
+--- a/lang/python/python-websockets/Makefile
++++ b/lang/python/python-websockets/Makefile
+@@ -19,4 +19,6 @@
+ PKG_LICENSE_FILES:=LICENSE
+ 
++PKG_BUILD_DEPENDS+=python-setuptools/host
++
+ include ../pypi.mk
+ include $(INCLUDE_DIR)/package.mk
+
